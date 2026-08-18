@@ -2,6 +2,8 @@
 
 DSH（DeepSeek Harness）远程 Web 启动 + 用户名/密码认证插件。
 
+![登录页](docs/login-page.png)
+
 原版 `@deepseek-ai/dsh-web-app/startup` 出于安全考虑**硬拒绝 `--host 0.0.0.0`**；本插件替换它，并配一个带登录/注册页的认证插件，让 `dsh web` 可以在局域网（或任何非回环接口）上安全暴露浏览器界面。
 
 ## 特性
