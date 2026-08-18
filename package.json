@@ -1,0 +1,55 @@
+{
+  "name": "dsh-web-startup-auth",
+  "version": "0.1.0",
+  "description": "DSH remote-aware web-startup replacement + username/password auth plugin: allows --host 0.0.0.0 when paired with the auth plugin",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./startup": {
+      "types": "./lib/types/startup.d.ts",
+      "default": "./lib/startup.js"
+    },
+    "./auth": {
+      "types": "./lib/types/auth.d.ts",
+      "default": "./lib/auth.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run tests",
+    "prepack": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-cmdline": "^0.1.0-rc.5",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.5",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "commander": "^15.0.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.2.0"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "license": "MIT"
+}

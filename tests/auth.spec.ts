@@ -1,0 +1,234 @@
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import type { Context } from '@deepseek-ai/cordis'
+import type { IncomingMessage, ServerResponse } from 'node:http'
+import { PassThrough } from 'node:stream'
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import { apply, type WebAuthService } from '../src/auth.ts'
+import {
+  registerCredentials,
+  signSession,
+  hardenCredentialFilePermissions,
+} from '../src/credential-store.ts'
+
+let authFile: string
+let authDir: string
+
+beforeEach(() => {
+  authDir = mkdtempSync(join(tmpdir(), 'dsh-web-auth-'))
+  authFile = join(authDir, 'web-auth.json')
+  process.env.DSH_WEB_AUTH_FILE = authFile
+})
+
+afterEach(() => {
+  delete process.env.DSH_WEB_AUTH_FILE
+  rmSync(authDir, { recursive: true, force: true })
+})
+
+/** Fake context that records every registered route for handler-level tests. */
+function fakeWebAuthContext(bindHost: string) {
+  const provided = new Map<string, unknown>()
+  const routes: WebRoute[] = []
+  const ctx = {
+    get: (key: string) => {
+      if (key === 'webStartup') return { trustedHosts: [] }
+      return undefined
+    },
+    provide: (key: string, value: unknown) => { provided.set(key, value) },
+    effect: (fn: () => void) => { fn() },
+    webServer: {
+      host: bindHost,
+      port: 3080,
+      register: (route: WebRoute) => { routes.push(route); return () => {} },
+      tapIndex: () => {},
+    },
+    logger: { info: () => {}, warn: () => {} },
+  } as unknown as Context
+  apply(ctx, {})
+  return {
+    auth: provided.get('webAuth') as WebAuthService,
+    routes,
+  }
+}
+
+function requestWithCookie(cookie?: string): IncomingMessage {
+  return {
+    headers: cookie === undefined ? {} : { cookie },
+  } as IncomingMessage
+}
+
+/** Build a valid signed session cookie (full Cookie header value). */
+function sessionCookie(username: string, ttlSec = 3600): string {
+  const exp = Math.floor(Date.now() / 1000) + ttlSec
+  const payload = JSON.stringify({ u: username, e: exp })
+  const sig = signSession(payload)
+  if (sig === undefined) throw new Error('session signing unavailable')
+  return `dsh_sid=${Buffer.from(payload, 'utf8').toString('base64url')}.${sig}`
+}
+
+// ── handler-level helpers ────────────────────────────────────────────────────
+
+function findRoute(routes: WebRoute[], path: string): WebRoute {
+  const route = routes.find((r) => r.path === path)
+  if (route === undefined) throw new Error(`route not found: ${path}`)
+  return route
+}
+
+interface CapturedResponse {
+  statusCode: number
+  body: string
+}
+
+function jsonResponseCapture() {
+  const captured: CapturedResponse = { statusCode: 0, body: '' }
+  const res = {
+    writeHead: (code: number) => { captured.statusCode = code },
+    end: (body?: string) => { captured.body = body ?? '' },
+  } as unknown as ServerResponse
+  return { captured, res }
+}
+
+/** A request stream with a JSON body and a fixed socket address. */
+function jsonRequest(method: string, body: unknown, opts: { ip?: string; cookie?: string } = {}): IncomingMessage {
+  const req = new PassThrough()
+  Object.assign(req, {
+    method,
+    socket: { remoteAddress: opts.ip ?? '127.0.0.1' },
+    headers: {
+      ...(opts.cookie !== undefined ? { cookie: opts.cookie } : {}),
+      'content-type': 'application/json',
+    },
+  })
+  req.end(Buffer.from(JSON.stringify(body), 'utf8'))
+  return req as unknown as IncomingMessage
+}
+
+async function callEndpoint(routes: WebRoute[], path: string, body: unknown, ip: string): Promise<CapturedResponse> {
+  const { captured, res } = jsonResponseCapture()
+  await findRoute(routes, path).handler(jsonRequest('POST', body, { ip }), res)
+  return captured
+}
+
+// ── service-level tests (session semantics) ──────────────────────────────────
+
+describe('web-auth service', () => {
+  it('allows loopback requests without credentials', () => {
+    const { auth } = fakeWebAuthContext('127.0.0.1')
+    expect(auth.authenticate(requestWithCookie())).toBe(true)
+  })
+
+  it('requires a valid session cookie when bound to 0.0.0.0', () => {
+    registerCredentials('admin', 'secret')
+    const { auth } = fakeWebAuthContext('0.0.0.0')
+    expect(auth.authenticate(requestWithCookie())).toBe(false)
+    expect(auth.authenticate(requestWithCookie('dsh_sid=forged.invalid'))).toBe(false)
+  })
+
+  it('accepts a valid session cookie on 0.0.0.0', () => {
+    registerCredentials('admin', 'secret')
+    const { auth } = fakeWebAuthContext('0.0.0.0')
+    expect(auth.authenticate(requestWithCookie(sessionCookie('admin')))).toBe(true)
+  })
+
+  it('rejects an expired session cookie on 0.0.0.0', () => {
+    registerCredentials('admin', 'secret')
+    const { auth } = fakeWebAuthContext('0.0.0.0')
+    const expired = sessionCookie('admin', -60)
+    expect(auth.authenticate(requestWithCookie(expired))).toBe(false)
+  })
+})
+
+// ── credential file protection ───────────────────────────────────────────────
+
+describe('credential file permissions', () => {
+  it('writes the credential file owner-only (0600)', () => {
+    registerCredentials('admin', 'supersecret1')
+    const mode = statSync(authFile).mode & 0o777
+    expect(mode).toBe(0o600)
+  })
+
+  it('hardenCredentialFilePermissions fixes a legacy broad file', () => {
+    writeFileSync(authFile, '{}', 'utf8')
+    chmodSync(authFile, 0o644)
+    hardenCredentialFilePermissions()
+    expect(statSync(authFile).mode & 0o777).toBe(0o600)
+  })
+})
+
+// ── register endpoint ────────────────────────────────────────────────────────
+
+describe('POST /api/auth/register', () => {
+  it('rejects a password below the minimum length', async () => {
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/register', { username: 'admin', password: 'short' }, '192.0.2.10')
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('rejects a second registration after the admin exists', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/register', { username: 'other', password: 'supersecret1' }, '192.0.2.10')
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('returns 413 for an oversized body', async () => {
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/register', { username: 'admin', password: 'x'.repeat(2 * 1024 * 1024) }, '192.0.2.10')
+    expect(res.statusCode).toBe(413)
+  })
+})
+
+// ── login endpoint: rate limiting and body cap ───────────────────────────────
+
+describe('POST /api/auth/login', () => {
+  it('returns 401 for wrong credentials', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'wrong-password' }, '192.0.2.20')
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('locks out a client after repeated failures, even with the correct password', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ip = '192.0.2.21'
+    for (let i = 0; i < 5; i += 1) {
+      const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'wrong-password' }, ip)
+      expect(res.statusCode).toBe(401)
+    }
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, ip)
+    expect(res.statusCode).toBe(429)
+  })
+
+  it('clears the failure counter on a successful login', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ip = '192.0.2.22'
+    for (let i = 0; i < 4; i += 1) {
+      await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'wrong-password' }, ip)
+    }
+    const ok = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, ip)
+    expect(ok.statusCode).toBe(200)
+    const failed = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'wrong-password' }, ip)
+    expect(failed.statusCode).toBe(401)
+  })
+
+  it('does not lock out other clients', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    for (let i = 0; i < 5; i += 1) {
+      await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'wrong-password' }, `192.0.2.3${i}`)
+    }
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, '192.0.2.99')
+    expect(res.statusCode).toBe(200)
+  })
+
+  it('returns 413 for an oversized body', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'x'.repeat(2 * 1024 * 1024) }, '192.0.2.20')
+    expect(res.statusCode).toBe(413)
+  })
+})

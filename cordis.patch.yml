@@ -1,0 +1,24 @@
+# DSH remote-aware web-startup + auth bundle.
+#
+# This patch is meant to be applied AFTER the web-app bundle layer, so it can:
+#   1. disable the stock web-startup (which hard-rejects --host 0.0.0.0)
+#   2. insert a remote-capable startup that provides the same webStartup service
+#   3. insert an auth plugin with front-end login/register
+#   4. patch the `connection` row to inject `webAuth` so it waits for the auth
+#      plugin to wrap the webserver's route registration.
+#
+# Usage:
+#   dsh --profile web --patch ./cordis.patch.yml --host 0.0.0.0
+
+- id: web-startup
+  disabled: true
+
+- id: connection
+  inject: [webServer, webRuntime, webAuth]
+
+- insert:
+    - id: remote-web-startup
+      name: dsh-web-startup-auth/startup
+
+    - id: web-auth
+      name: dsh-web-startup-auth/auth
