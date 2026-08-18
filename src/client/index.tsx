@@ -57,6 +57,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
   const [confirm, setConfirm] = useState('')
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
+  const [confirmingSignOut, setConfirmingSignOut] = useState(false)
 
   const flash = useCallback((notice: Notice | undefined) => {
     setNotice(notice)
@@ -72,6 +73,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       window.location.href = '/login'
     } catch {
       setBusy(false)
+      setConfirmingSignOut(false)
       flash({ kind: 'error', text: '退出失败，请重试' })
     }
   }, [flash])
@@ -131,12 +133,33 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
         </p>
         <button
           type="button"
-          onClick={() => void signOut()}
+          onClick={() => setConfirmingSignOut(true)}
           disabled={busy}
           style={{ ...buttonStyle, background: 'none', borderColor: '#d4380d', color: '#d4380d' }}
         >
           退出登录
         </button>
+        {confirmingSignOut && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+            <span style={{ fontSize: 13, color: '#666' }}>退出登录将回到登录页</span>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              disabled={busy}
+              style={{ ...buttonStyle, padding: '4px 12px', background: '#d4380d', color: '#ffffff' }}
+            >
+              确认退出
+            </button>
+            <button
+              type="button"
+              onClick={() => setConfirmingSignOut(false)}
+              disabled={busy}
+              style={{ ...buttonStyle, padding: '4px 12px', background: 'none', borderColor: '#d9d9d9', color: '#333' }}
+            >
+              取消
+            </button>
+          </div>
+        )}
       </section>
 
       <section>
