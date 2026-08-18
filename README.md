@@ -12,7 +12,7 @@ DSH（DeepSeek Harness）远程 Web 启动 + 用户名/密码认证插件。
 - **API 保护**：所有 `/api/*` 路由（除 `/api/auth/*`）必须携带有效会话，否则返回 401。
 - **设置面板「认证」标签页**：向 DSH 设置面板注入"认证"页，提供**退出登录**与**修改密码**两个操作。
 - **远程场景修复**（局域网 HTTP 访问的两个坑）：
-  - `crypto.randomUUID` polyfill —— 非安全上下文下该 API 缺失，会导致所有 RPC 失败（详见下文"已知问题"）。
+  - `crypto.randomUUID` polyfill —— 非安全上下文下该 API 缺失，会导致所有 RPC 失败。
   - 特权 API 回环放行 —— DSH 将 `settings.*` / `credentials.*` 等敏感域强制限制在回环地址；认证通过后本插件以回环身份放行。
 
 ## 安装
@@ -56,46 +56,9 @@ dsh web --host 0.0.0.0
 - **忘记密码**：在服务器本机执行 `dsh --profile web auth-reset`，交互式设置新密码（或 `dsh --profile web auth-reset --password <新密码>` 非交互）。重置会**轮换会话密钥，作废所有已签发的会话**。
 - 兜底方案：删除 `~/.dsh/web-auth.json` 并重启，即可重新注册（同样会作废所有会话，但需重启服务）。
 
-## 工作原理
+## 索引
 
-插件由**三个模块**组成（通过 `package.json` 的 exports 分别暴露；其中 client 是浏览器端前端插件）：
-
-| 子模块 | 插件名 | 职责 |
-| --- | --- | --- |
-| `dsh-web-startup-auth/startup` | `remote-web-startup` | 解析 Web 命令行参数（`--host` / `--port` / `--trusted-host`），提供 `webStartup` 服务；不拒绝 `0.0.0.0` |
-| `dsh-web-startup-auth/auth` | `web-auth` | 登录页、认证 API、`/api` 路由保护、`webAuth` 服务 |
-| `dsh-web-startup-auth/client` | `web-auth` 前端插件 | 向设置面板 `settings.section` slot 注册「认证」标签页（退出登录 + 修改密码 UI） |
-
-认证插件安装的防线：
-
-1. **路由保护**：包装 `webServer.register`，所有 `/api` 前缀路由（`/api/auth/*` 除外）先校验会话 cookie。回环绑定（`127.0.0.1`）时隐式信任，不强制登录。
-2. **索引注入**：向 SPA 的 `index.html` 注入检查脚本，无有效会话时重定向到 `/login`。
-3. **认证服务**：提供 `webAuth.authenticate(req)`，`connection` 行注入 `webAuth` 后，事件流等下游层可复用同一认证结论。
-4. **前端插件**：包声明 `dsh.client`（`platform: "web"`），DSH 的 `ClientModuleRegistry` 把它编入 `window.__DSH_BOOT__`，浏览器端 loader 加载 `lib/client.js` 后执行 `apply`，通过 `ctx.slots.inject('settings.section', …)` 注册标签页。
-
-认证 API（全部在 `/api/auth/*`，不受路由保护，端点内部自行校验）：
-
-| 端点 | 说明 |
-| --- | --- |
-| `GET /api/auth/status` | 凭据是否已注册、当前请求是否已认证、认证后的用户名 |
-| `POST /api/auth/register` | 首次注册管理员（凭据未设置时可用） |
-| `POST /api/auth/login` | 登录，下发会话 cookie（带 IP 限速） |
-| `POST /api/auth/logout` | 清除会话 cookie |
-| `POST /api/auth/change-password` | 修改密码：需已认证 + 旧密码正确；成功后**轮换会话密钥**并重新签发当前会话 |
-
-## 已知问题（已修复）
-
-### 非安全上下文下 `crypto.randomUUID` 缺失
-
-通过**局域网 IP + 明文 HTTP** 访问时（如 `http://192.168.5.216:3080`），页面处于非安全上下文，`crypto.randomUUID` 不存在，DSH 前端每个 RPC（`host.describe`、`session.list` 等）都会抛 `TypeError: crypto.randomUUID is not a function`，表现为"WebSocket is closed before the connection is established" + 无限重连。
-
-**修复**：本插件向 SPA 注入基于 `crypto.getRandomValues`（非安全上下文可用）的 `randomUUID` polyfill，在客户端 bundle 运行前生效。
-
-### 特权 API 的回环限制
-
-DSH 的 `dsh-client-connection` 把 `settings.*`、`credentials.*`、`agentPreset.*`、`llm.discoverModels` 等方法强制限制为**仅回环可访问**（原实现注释：`until a real authentication layer exists`）。远程访问时这些接口返回 403。
-
-**修复**：认证通过后，本插件将请求的 `Host` / `Origin` 头临时改写为 `127.0.0.1:<port>` 再转发给下游 handler（处理完成后还原）。有效会话即认证层，等价于回环信任；匿名请求仍被 401 拦截。
+如果您在寻找开箱即用的专为 Agent 时代研发的 IDE，推荐您使用 [Omniterm](https://github.com/GDWhisper/OmniTerm)
 
 ## 安全说明
 
