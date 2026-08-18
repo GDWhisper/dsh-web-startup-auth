@@ -1,5 +1,7 @@
 # dsh-web-startup-auth
 
+**中文** | [English](README.en.md)
+
 DSH（DeepSeek Harness）远程 Web 启动 + 用户名/密码认证插件。
 
 ![登录页](docs/login-page.png)
