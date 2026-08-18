@@ -43,8 +43,7 @@ dsh plugin --profile web add dsh-web-startup-auth
 dsh web --host 0.0.0.0
 ```
 
-> 若通过 `--patch ./cordis.patch.yml` 叠加，则为：
-> `dsh --profile web --patch ./cordis.patch.yml --host 0.0.0.0`
+> 安装时已自动应用补丁，无需再用 `--patch` 叠加——重复叠加会把插件再插入一遍，导致重复。
 
 ## 使用
 
