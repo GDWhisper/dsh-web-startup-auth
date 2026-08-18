@@ -131,35 +131,70 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
         <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
           {username !== undefined ? `当前登录：${username}` : '当前登录：管理员'}
         </p>
-        <button
-          type="button"
-          onClick={() => setConfirmingSignOut(true)}
-          disabled={busy}
-          style={{ ...buttonStyle, background: 'none', borderColor: '#d4380d', color: '#d4380d' }}
-        >
-          退出登录
-        </button>
-        {confirmingSignOut && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
-            <span style={{ fontSize: 13, color: '#666' }}>退出登录将回到登录页</span>
-            <button
-              type="button"
-              onClick={() => void signOut()}
-              disabled={busy}
-              style={{ ...buttonStyle, padding: '4px 12px', background: '#d4380d', color: '#ffffff' }}
+        <div style={{ position: 'relative', display: 'inline-block' }}>
+          <button
+            type="button"
+            onClick={() => setConfirmingSignOut(true)}
+            disabled={busy}
+            style={{ ...buttonStyle, background: 'none', borderColor: '#d4380d', color: '#d4380d' }}
+          >
+            退出登录
+          </button>
+          {confirmingSignOut && (
+            <div
+              role="alertdialog"
+              aria-label="确认退出登录"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% + 10px)',
+                left: 0,
+                zIndex: 10,
+                minWidth: 260,
+                padding: '12px 14px',
+                background: '#ffffff',
+                border: '1px solid #e5e5e5',
+                borderRadius: 8,
+                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
+              }}
             >
-              确认退出
-            </button>
-            <button
-              type="button"
-              onClick={() => setConfirmingSignOut(false)}
-              disabled={busy}
-              style={{ ...buttonStyle, padding: '4px 12px', background: 'none', borderColor: '#d9d9d9', color: '#333' }}
-            >
-              取消
-            </button>
-          </div>
-        )}
+              <div
+                aria-hidden
+                style={{
+                  position: 'absolute',
+                  top: -6,
+                  left: 28,
+                  width: 10,
+                  height: 10,
+                  background: '#ffffff',
+                  borderLeft: '1px solid #e5e5e5',
+                  borderTop: '1px solid #e5e5e5',
+                  transform: 'rotate(45deg)',
+                }}
+              />
+              <div style={{ fontSize: 13, color: '#333', marginBottom: 10 }}>
+                退出登录将回到登录页
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingSignOut(false)}
+                  disabled={busy}
+                  style={{ ...buttonStyle, padding: '4px 12px', background: 'none', borderColor: '#d9d9d9', color: '#333' }}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void signOut()}
+                  disabled={busy}
+                  style={{ ...buttonStyle, padding: '4px 12px', background: '#d4380d', color: '#ffffff' }}
+                >
+                  确认退出
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       </section>
 
       <section>
