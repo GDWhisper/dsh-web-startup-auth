@@ -153,6 +153,32 @@ export function resetPassword(newPassword: string): void {
 }
 
 /**
+ * Change the stored password after verifying the old one.
+ *
+ * Rotates the session signing secret (like {@link resetPassword}), which
+ * invalidates every already-issued session cookie — the caller must re-issue
+ * a fresh session for the authenticated user.
+ * @param oldPassword - the current password (verified against the store).
+ * @param newPassword - the replacement password.
+ * @returns `true` when the old password matched and the change was applied.
+ */
+export function changePassword(oldPassword: string, newPassword: string): boolean {
+  const creds = readCredentials()
+  if (creds === undefined) return false
+  if (!validateCredentials(creds.username, oldPassword)) return false
+  resetPassword(newPassword)
+  return true
+}
+
+/**
+ * Get the configured username, if credentials are set.
+ * @returns the username, or `undefined` when not registered.
+ */
+export function getUsername(): string | undefined {
+  return readCredentials()?.username
+}
+
+/**
  * Get the session HMAC secret.
  * @returns the secret, or `undefined` if not registered.
  */

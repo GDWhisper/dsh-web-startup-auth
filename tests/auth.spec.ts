@@ -11,6 +11,10 @@ import {
   registerCredentials,
   signSession,
   hardenCredentialFilePermissions,
+  changePassword,
+  getSessionSecret,
+  getUsername,
+  validateCredentials,
 } from '../src/credential-store.ts'
 
 let authFile: string
@@ -79,12 +83,20 @@ function findRoute(routes: WebRoute[], path: string): WebRoute {
 interface CapturedResponse {
   statusCode: number
   body: string
+  setCookie?: string
 }
 
 function jsonResponseCapture() {
   const captured: CapturedResponse = { statusCode: 0, body: '' }
   const res = {
-    writeHead: (code: number) => { captured.statusCode = code },
+    writeHead: (code: number, headers?: Record<string, string | string[]>) => {
+      captured.statusCode = code
+      if (headers !== undefined) {
+        const value = headers['set-cookie']
+        if (Array.isArray(value)) captured.setCookie = value[0]
+        else if (typeof value === 'string') captured.setCookie = value
+      }
+    },
     end: (body?: string) => { captured.body = body ?? '' },
   } as unknown as ServerResponse
   return { captured, res }
@@ -230,5 +242,100 @@ describe('POST /api/auth/login', () => {
     const { routes } = fakeWebAuthContext('0.0.0.0')
     const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'x'.repeat(2 * 1024 * 1024) }, '192.0.2.20')
     expect(res.statusCode).toBe(413)
+  })
+})
+
+// ── change-password endpoint ─────────────────────────────────────────────────
+
+describe('POST /api/auth/change-password', () => {
+  it('rejects an unauthenticated caller on 0.0.0.0', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/change-password', { oldPassword: 'supersecret1', newPassword: 'newsecret1' }, '192.0.2.40')
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('rejects a wrong old password for an authenticated caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/change-password').handler(
+      jsonRequest('POST', { oldPassword: 'wrong-password', newPassword: 'newsecret1' }, {
+        ip: '192.0.2.41',
+        cookie: sessionCookie('admin'),
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('rejects a too-short new password', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/change-password').handler(
+      jsonRequest('POST', { oldPassword: 'supersecret1', newPassword: 'short' }, {
+        ip: '192.0.2.42',
+        cookie: sessionCookie('admin'),
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(400)
+  })
+
+  it('rotates the signing secret and re-issues a session for the caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const oldCookie = sessionCookie('admin')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/change-password').handler(
+      jsonRequest('POST', { oldPassword: 'supersecret1', newPassword: 'newsecret1' }, {
+        ip: '192.0.2.43',
+        cookie: oldCookie,
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    // Old cookie is invalidated by the secret rotation
+    const { auth } = fakeWebAuthContext('0.0.0.0')
+    expect(auth.authenticate(requestWithCookie(oldCookie))).toBe(false)
+    // The re-issued cookie from the response authenticates the new secret
+    const freshCookie = captured.setCookie?.split(';')[0]
+    expect(freshCookie).toMatch(/^dsh_sid=/)
+    expect(auth.authenticate(requestWithCookie(freshCookie))).toBe(true)
+    // New credentials validate
+    expect(validateCredentials('admin', 'newsecret1')).toBe(true)
+  })
+
+  it('allows a loopback caller without a session cookie', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('127.0.0.1')
+    const res = await callEndpoint(routes, '/api/auth/change-password', { oldPassword: 'supersecret1', newPassword: 'newsecret1' }, '127.0.0.1')
+    expect(res.statusCode).toBe(200)
+    expect(validateCredentials('admin', 'newsecret1')).toBe(true)
+  })
+})
+
+// ── credential-store changePassword ──────────────────────────────────────────
+
+describe('credential-store changePassword', () => {
+  it('returns false when credentials are not set', () => {
+    expect(changePassword('whatever', 'whatever1')).toBe(false)
+  })
+
+  it('returns false when the old password does not match', () => {
+    registerCredentials('admin', 'supersecret1')
+    expect(changePassword('wrong-password', 'newsecret1')).toBe(false)
+    expect(validateCredentials('admin', 'supersecret1')).toBe(true)
+  })
+
+  it('replaces the password and rotates the secret on success', () => {
+    registerCredentials('admin', 'supersecret1')
+    const before = getSessionSecret()
+    expect(changePassword('supersecret1', 'newsecret1')).toBe(true)
+    expect(validateCredentials('admin', 'newsecret1')).toBe(true)
+    expect(validateCredentials('admin', 'supersecret1')).toBe(false)
+    expect(getSessionSecret()).not.toBe(before)
+    expect(getUsername()).toBe('admin')
   })
 })

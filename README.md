@@ -10,6 +10,7 @@ DSH（DeepSeek Harness）远程 Web 启动 + 用户名/密码认证插件。
 - **登录/注册页**：首次访问引导设置管理员账号密码，之后进入登录页；与 DSH 黑白蓝风格一致。
 - **会话认证**：登录后下发签名 cookie（`dsh_sid`，14 天有效，`HttpOnly` + `SameSite=Lax`）。
 - **API 保护**：所有 `/api/*` 路由（除 `/api/auth/*`）必须携带有效会话，否则返回 401。
+- **设置面板「认证」标签页**：向 DSH 设置面板注入"认证"页，提供**退出登录**与**修改密码**两个操作。
 - **远程场景修复**（局域网 HTTP 访问的两个坑）：
   - `crypto.randomUUID` polyfill —— 非安全上下文下该 API 缺失，会导致所有 RPC 失败（详见下文"已知问题"）。
   - 特权 API 回环放行 —— DSH 将 `settings.*` / `credentials.*` 等敏感域强制限制在回环地址；认证通过后本插件以回环身份放行。
@@ -46,7 +47,7 @@ dsh web --host 0.0.0.0
 1. 浏览器访问 `http://<主机IP>:<端口>/`。
 2. 首次访问会跳转到 `/login`，显示"设置管理员账号密码"注册表单。
 3. 注册成功后自动登录并进入主界面；之后访问需登录。
-4. 退出登录：`/api/auth/logout`（界面暂无退出按钮，可清 cookie）。
+4. 退出登录 / 修改密码：打开主界面**设置面板 → 认证**标签页（同时也是一个独立入口，`/api/auth/logout` 清除会话 cookie）。
 
 凭据与会话密钥保存在 `~/.dsh/web-auth.json`：
 
@@ -57,18 +58,30 @@ dsh web --host 0.0.0.0
 
 ## 工作原理
 
-插件由两个子模块组成（通过 `package.json` 的 exports 分别暴露）：
+插件由**三个模块**组成（通过 `package.json` 的 exports 分别暴露；其中 client 是浏览器端前端插件）：
 
 | 子模块 | 插件名 | 职责 |
 | --- | --- | --- |
 | `dsh-web-startup-auth/startup` | `remote-web-startup` | 解析 Web 命令行参数（`--host` / `--port` / `--trusted-host`），提供 `webStartup` 服务；不拒绝 `0.0.0.0` |
 | `dsh-web-startup-auth/auth` | `web-auth` | 登录页、认证 API、`/api` 路由保护、`webAuth` 服务 |
+| `dsh-web-startup-auth/client` | `web-auth` 前端插件 | 向设置面板 `settings.section` slot 注册「认证」标签页（退出登录 + 修改密码 UI） |
 
 认证插件安装的防线：
 
 1. **路由保护**：包装 `webServer.register`，所有 `/api` 前缀路由（`/api/auth/*` 除外）先校验会话 cookie。回环绑定（`127.0.0.1`）时隐式信任，不强制登录。
 2. **索引注入**：向 SPA 的 `index.html` 注入检查脚本，无有效会话时重定向到 `/login`。
 3. **认证服务**：提供 `webAuth.authenticate(req)`，`connection` 行注入 `webAuth` 后，事件流等下游层可复用同一认证结论。
+4. **前端插件**：包声明 `dsh.client`（`platform: "web"`），DSH 的 `ClientModuleRegistry` 把它编入 `window.__DSH_BOOT__`，浏览器端 loader 加载 `lib/client.js` 后执行 `apply`，通过 `ctx.slots.inject('settings.section', …)` 注册标签页。
+
+认证 API（全部在 `/api/auth/*`，不受路由保护，端点内部自行校验）：
+
+| 端点 | 说明 |
+| --- | --- |
+| `GET /api/auth/status` | 凭据是否已注册、当前请求是否已认证、认证后的用户名 |
+| `POST /api/auth/register` | 首次注册管理员（凭据未设置时可用） |
+| `POST /api/auth/login` | 登录，下发会话 cookie（带 IP 限速） |
+| `POST /api/auth/logout` | 清除会话 cookie |
+| `POST /api/auth/change-password` | 修改密码：需已认证 + 旧密码正确；成功后**轮换会话密钥**并重新签发当前会话 |
 
 ## 已知问题（已修复）
 
@@ -89,9 +102,9 @@ DSH 的 `dsh-client-connection` 把 `settings.*`、`credentials.*`、`agentPrese
 - 本插件提供认证，但不提供传输加密。明文 HTTP 下凭据与流量可被同一网络中的抓包者看到，**建议仅在可信内网使用**，或在前面部署 HTTPS 反向代理。
 - 会话 14 天有效；如需收紧可修改 `src/auth.ts` 中的 `SESSION_MAX_AGE_SEC`。
 - 密码散列使用 Node 内置 `crypto.scryptSync`，无第三方依赖。
-- **会话不可服务端撤销**：`dsh_sid` 是自包含签名 cookie，`/api/auth/logout` 只清除浏览器一侧的 cookie。cookie 一旦泄露（如明文 HTTP 下被嗅探），14 天有效期内无法单独吊销。**唯一例外**：`dsh --profile web auth-reset` 会轮换会话密钥，一次性作废全部会话。
+- **会话不可服务端撤销**：`dsh_sid` 是自包含签名 cookie，`/api/auth/logout` 只清除浏览器一侧的 cookie。cookie 一旦泄露（如明文 HTTP 下被嗅探），14 天有效期内无法单独吊销。**例外**：`dsh --profile web auth-reset` 和设置面板的「修改密码」都会**轮换会话密钥**，一次性作废全部会话（修改密码后当前会话由服务端重新签发，保持登录）。
 - **首次注册窗口**：凭据未设置时任何访问者都可注册为管理员。**在把服务暴露到不可信网络之前**请先完成首次注册。
-- **登录防护**：登录失败按客户端 IP 限速——连续 5 次失败锁定 30 秒（纯内存、无持久化）；注册要求密码至少 8 个字符。限速仅覆盖 `/api/auth/login`，如需更严格防护请在反向代理层增加通用限速。
+- **登录防护**：登录失败按客户端 IP 限速——连续 5 次失败锁定 30 秒（纯内存、无持久化）；注册要求密码至少 8 个字符。限速覆盖 `/api/auth/login` 与 `/api/auth/change-password`（旧密码错误同样计次）。如需更严格防护请在反向代理层增加通用限速。
 - **凭据文件权限**：`~/.dsh/web-auth.json`（含密码哈希与会话签名密钥）以 `0600` 保存，目录以 `0700` 创建；插件启动时会自动修复旧版本遗留的过宽权限。
 - **`--trusted-host`**：该参数仅为与原版 CLI 兼容而保留透传，**不参与本插件认证判断**——远程客户端一律需要有效会话，不存在"受信主机免登录"。
 
@@ -101,8 +114,12 @@ DSH 的 `dsh-client-connection` 把 `settings.*`、`credentials.*`、`agentPrese
 npm install
 npm run typecheck   # tsc --noEmit
 npm test            # vitest
-npm run build       # tsc -p tsconfig.json，产物输出到 lib/
+npm run build       # tsc -p tsconfig.json + tsdown，产物输出到 lib/
 ```
+
+- `tsc` 编译 node 侧源码（`src/*.ts`）与类型声明到 `lib/`、`lib/types/`。
+- `tsdown` 把前端插件（`src/client/index.tsx`）打包成浏览器 bundle `lib/client.js`（`window.__ModuleLoader__.load` 注册格式）。改前端代码后必须重新构建，profile 里 `link:` 安装会自动加载新产物。
+- 前端插件依赖的 `@deepseek-ai/dsh-client-*` 包只用于类型与构建，运行时由 DSH 前端模块表提供。
 
 ## 许可证
 

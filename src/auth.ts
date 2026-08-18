@@ -27,6 +27,8 @@ import {
   signSession,
   verifySession,
   hardenCredentialFilePermissions,
+  changePassword,
+  getUsername,
   MIN_PASSWORD_LENGTH,
 } from './credential-store.ts'
 
@@ -298,7 +300,11 @@ export function apply(ctx: Context, _config: Config): void {
       handler: async (req, res) => {
         const registered = hasCredentials()
         const authenticated = isAuthorized(req, bindHost)
-        jsonResponse(res, 200, { registered, authenticated })
+        // Username is only exposed once authenticated (loopback or valid session).
+        const username = authenticated ? (bindHost === ALL_INTERFACES_HOST
+          ? validateSessionCookie(req)
+          : getUsername()) : undefined
+        jsonResponse(res, 200, { registered, authenticated, username })
       },
     },
     {
@@ -405,6 +411,75 @@ export function apply(ctx: Context, _config: Config): void {
       handler: async (req, res) => {
         res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': SESSION_CLEAR })
         res.end(JSON.stringify({ ok: true }))
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/auth/change-password',
+      handler: async (req, res) => {
+        if (req.method !== 'POST') {
+          res.writeHead(405)
+          res.end()
+          return
+        }
+        // Change-password requires an authenticated caller: on 0.0.0.0 the
+        // session cookie (already validated by isAuthorized); on loopback the
+        // implicit trust applies. Rate limiting mirrors the login endpoint.
+        try {
+          pruneLoginFailures()
+          if (!isAuthorized(req, bindHost)) {
+            jsonResponse(res, 401, { error: '未登录或会话已过期' })
+            return
+          }
+          if (isLockedOut(req)) {
+            jsonResponse(res, 429, { error: '尝试次数过多，请稍后再试' })
+            return
+          }
+          const body = await parseBody(req)
+          const oldPassword = typeof body.oldPassword === 'string' ? body.oldPassword : ''
+          const newPassword = typeof body.newPassword === 'string' ? body.newPassword : ''
+          if (!oldPassword || !newPassword) {
+            jsonResponse(res, 400, { error: '请输入旧密码和新密码' })
+            return
+          }
+          if (newPassword.length < MIN_PASSWORD_LENGTH) {
+            jsonResponse(res, 400, { error: `密码至少 ${MIN_PASSWORD_LENGTH} 个字符` })
+            return
+          }
+          // Capture the identity BEFORE changePassword: it rotates the signing
+          // secret, after which the old session cookie no longer verifies.
+          const username = bindHost === ALL_INTERFACES_HOST
+            ? validateSessionCookie(req)
+            : getUsername()
+          if (username === undefined) {
+            jsonResponse(res, 401, { error: '未登录或会话已过期' })
+            return
+          }
+          if (!changePassword(oldPassword, newPassword)) {
+            recordLoginFailure(req)
+            ctx.logger.warn('web-auth: change-password failed (from %s)', clientIp(req) ?? 'unknown')
+            jsonResponse(res, 401, { error: '旧密码错误' })
+            return
+          }
+          recordLoginSuccess(req)
+          ctx.logger.info('web-auth: password changed (from %s)', clientIp(req) ?? 'unknown')
+          // changePassword rotates the signing secret, invalidating every
+          // previously issued session cookie — re-issue one for this caller.
+          const cookie = buildSessionCookie(username)
+          if (cookie === undefined) {
+            jsonResponse(res, 500, { error: '服务器内部错误' })
+            return
+          }
+          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': sessionCookieSet(cookie) })
+          res.end(JSON.stringify({ ok: true }))
+        } catch (error) {
+          if (isBodyTooLarge(error)) {
+            jsonResponse(res, 413, { error: '请求体过大' })
+            return
+          }
+          ctx.logger.warn('web-auth: change-password failed: %s', error instanceof Error ? error.message : String(error))
+          jsonResponse(res, 500, { error: '服务器内部错误' })
+        }
       },
     },
   ]

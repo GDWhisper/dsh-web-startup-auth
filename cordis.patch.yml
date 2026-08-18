@@ -17,6 +17,9 @@
   inject: [webServer, webRuntime, webAuth]
 
 - insert:
+    - id: dsh-web-startup-auth
+      name: dsh-web-startup-auth
+
     - id: remote-web-startup
       name: dsh-web-startup-auth/startup
 
