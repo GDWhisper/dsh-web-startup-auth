@@ -45,6 +45,17 @@ export function apply(ctx: Context, config) { /* 挂载逻辑 */ }
 - **生命周期**：`ctx.effect(fn, label)` 里的 fn 在插件激活后执行；`apply` 里抛错会中断整个 profile 启动。
 - **命令行解析**：用 `@deepseek-ai/dsh-cmdline` 的 `parseCmdline(ctx, commanderProgram)`，把 commander 命令接到 dsh 的 `cmdlineArgs` 服务上。
 
+### 前端插件（browser half）——给 DSH 界面注入 UI
+
+DSH 的浏览器界面（SPA）**本身就是一组前端插件**：后端 `ClientModuleRegistry`（`packages/client/modules/src/index.ts`）扫描所有 loader entry 的 `package.json` 的 `dsh.client` 声明，组合成 `window.__DSH_BOOT__` 注入 `index.html`，浏览器端 loader 按图加载每个包的 `lib/client.js` 并执行其 `apply`。**想给 DSH 界面加东西（设置面板标签页、菜单、按钮等），走的不是 `webServer.register`，而是这个前端插件机制**——一个 npm 包可以同时有 node half（`exports["."]`）和 browser half（`exports["./client"]`）。
+
+要点与**踩过的坑**：
+
+- 声明：`package.json` 加 `dsh.client: { platform: "web", inject: [依赖的前端插件包名] }` 和 `exports["./client"]`（`dsh.client` 与 `dsh.bundle` 的 patch 层互不排斥，可并存）。
+- 打包：`lib/client.js` 由 `tsdown` 打包，格式为 `window.__ModuleLoader__.load({ id: 包名, factory: (require) => {…} })`；`react` / `react/jsx-runtime` / `@deepseek-ai/cordis` / `dsh-client-ui-slots` 保持 external（loader 模块表提供），其余依赖内联。
+- **关键坑（客户端包必须插"包根行"）**：`ClientModuleRegistry` 用 loader entry 的 `name` 字段当**包名**去 resolve `package.json` 读 `dsh.client`。因此 `cordis.patch.yml` 里必须**插入一条 `name` 为纯包名（包根，如 `name: dsh-web-startup-auth`）的 entry**——只插子路径（`name: xxx/startup`）时该包永远不被识别为 client 包，`dsh.client` 声明形同虚设（本插件踩过，见「设置面板标签页」）。包根入口（`lib/index.js`）需导出 `apply()`（可为空，模仿 `@deepseek-ai/dsh-client-ui-settings` 的 node half），loader 才能激活该行。
+- 设置面板是 **slot 贡献点机制**：`ui-settings` 声明 `settings.section` 契约（`packages/client/ui-settings/src/client/contract/slots.ts`），前端插件用 `ctx.slots.inject('settings.section', …)` 注册标签页（参考 `ui-settings-models/src/client/index.ts:118`）。
+
 ### bundle patch 机制
 
 dsh 的 profile 配置由多层 patch 叠加合成，`cordis.patch.yml` 就是插件的 patch 文件。顶层是 **YAML 数组**，每项一个 patch 条目（本项目 `cordis.patch.yml` 的四种写法全覆盖）：
@@ -63,7 +74,7 @@ dsh 的 profile 配置由多层 patch 叠加合成，`cordis.patch.yml` 就是�
 
 - `{ id, disabled: true }`：禁用某个插件。
 - `{ id, inject: [...] }`：给某个已有行追加注入的能力名。
-- `{ insert: [{ id, name }] }`：插入插件（`name` 是 npm 包名 + `/子路径`）。
+- `{ insert: [{ id, name }] }`：插入插件（`name` 是 npm 包名 + `/子路径`；**前端插件包必须插纯包名「包根行」**，见「前端插件（browser half）」）。
 - patch 里允许 `!!js` 表达式（仅限 config 值和 disabled 字段），其他元数据保持字面量。
 
 ### profile 组成与插件安装/卸载
@@ -98,6 +109,7 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 - `dsh --profile web --dump-config` 看组合后的插件树：确认 patch 生效、disabled 冲突、`# == <bundle>, patched by <bundle>` 标出的 patch 来源。
 - 插件加载失败体现在 dsh 启动日志；`apply` 里抛错会中断启动。最常见的启动失败是 **`Cannot find module '.../lib/xxx.js'`——没构建**。
 - 插件树里某行没有出现在 dump 输出，查 profile `package.json` 的 `dsh.profile.bundles` 是否有该包、patch 是否 `disabled`。
+- **前端插件不生效时**：先 `curl -s <主机>:<端口>/ | grep -o '__DSH_BOOT__[^<]*'` 看 entry 里有没有你的包名；再 `curl -s -o /dev/null -w "%{http_code}" <主机>:<端口>/plugins/<包名>/client.js` 应返回 200。若包名不在 boot 图里，查 patch 是否有「包根行」（`name` 为纯包名）、包根入口是否导出了 `apply()`。
 
 ---
 
@@ -128,9 +140,11 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 
 **设置面板标签页（前端插件机制）**：DSH 的 SPA 本身就是一组「前端插件」——后端 `ClientModuleRegistry`（`packages/client/modules/src/index.ts`）扫描所有已安装包的 `dsh.client` 声明，组合成 `window.__DSH_BOOT__`，浏览器 loader 按图加载每个包的 `lib/client.js` 并执行其 `apply`。设置面板是 slot 贡献点机制：`ui-settings` 声明 `settings.section` 契约（`packages/client/ui-settings/src/client/contract/slots.ts`），前端插件用 `ctx.slots.inject('settings.section', …)` 注册标签页（参考 `ui-settings-models/src/client/index.ts:118`）。本插件的 `src/client/index.tsx` 即按此注册「认证」标签页。要点：
 - `package.json` 需声明 `dsh.client: { platform: "web", inject: [依赖包名] }` 与 `exports["./client"]`；`dsh.client` 与 `dsh.bundle`（patch 层）互不排斥。
+- **必须插「包根行」**：`ClientModuleRegistry` 按 loader entry 的 `name`（patch 里 insert 的 `name` 字段）当包名去解析 `package.json` 读 `dsh.client`，所以 `cordis.patch.yml` 里除了 `remote-web-startup`/`web-auth` 两个子路径行，还插了一条 **`- id: dsh-web-startup-auth / name: dsh-web-startup-auth`**（纯包名）。删掉它标签页就不会出现。`src/index.ts` 的空 `apply()` 就是为这个包根行存在的（模仿 `ui-settings` 的 node half）。
 - `lib/client.js` 由 `tsdown`（`tsdown.config.ts`，模仿 harness 的 `clientBundle` preset）打包，格式为 `window.__ModuleLoader__.load({ id, factory })`；`react`/`@deepseek-ai/cordis`/`ui-slots` 保持 external（loader 模块表提供），其余依赖内联。
 - 组件 props 必须匹配 `PropsRuntime<'settings.section'>`（owner share 是 `{ close }`），不能用裸 `SettingsSectionOwnerProps`。
 - 前端插件只需注入 `slots` 服务；标签页调 `/api/auth/*` 走普通 `fetch`，不走 connection RPC。
+- 改了 `cordis.patch.yml` 或前端插件后**必须重启 `dsh web`**（patch 按包名缓存、不热加载）。
 
 ### 核心代码路径
 
@@ -143,14 +157,14 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 | `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改密码 UI），打包为 `lib/client.js` |
 | `tsdown.config.ts` | 前端插件打包配置（`window.__ModuleLoader__.load` 格式、external 列表） |
 | `src/index.ts` | 仅类型导出（`WebStartupValues`、`AuthConfig`、`WebAuthService`） |
-| `cordis.patch.yml` | bundle patch：禁用 `web-startup`、insert 两个插件、`connection` 注入 `webAuth` |
+| `cordis.patch.yml` | bundle patch：禁用 `web-startup`、insert 三个插件（含包根行 `dsh-web-startup-auth`，客户端扫描必需）、`connection` 注入 `webAuth` |
 
 ### 如何修改
 
 1. **改 `src/*.ts`（或 `src/client/*.tsx`），然后 `npm run build`**（`lib/` 是唯一被加载的产物：`tsc` 出 node 侧、`tsdown` 出前端 bundle；不构建等于没改）。
 2. 想对照原版行为时看 harness 的 `packages/bundle/web-app/src/startup.ts`（原版 startup 逻辑）。
 3. 涉及认证/信任语义时，对照 `packages/client/connection/src/api-request-trust.ts`（浏览器信任围栏，**明确不是认证层**）和 `packages/client/connection/src/index.ts`（`PRIVILEGED_METHODS` 回环限制）——本插件的「回环放行」是为了绕过后者。
-4. 改动 `cordis.patch.yml` 时保持 `connection.inject: [webAuth]`（见「路由保护顺序」）。
+4. 改动 `cordis.patch.yml` 时保持 `connection.inject: [webAuth]`（见「路由保护顺序」），并**保持「包根行」**（`- id: dsh-web-startup-auth / name: dsh-web-startup-auth`，见「设置面板标签页」）——删除它前端插件不会进 boot 图。
 5. 改前端标签页时对照 `ui-settings-models/src/client/index.ts`（slot 注册范本）与 `packages/client/ui-settings/src/client/contract/slots.ts`（`settings.section` 契约）；组件 props 用 `PropsRuntime<'settings.section'>`。
 6. 改完跑测试（见下），**更新 README.md 和本文件的对应段落**。
 
@@ -194,6 +208,11 @@ dsh web
   - `packages/client/connection/src/index.ts` — `PRIVILEGED_METHODS` 回环限制（~78 行注释）
   - `packages/client/connection/src/api-request-trust.ts` — 浏览器信任围栏（DNS rebinding / 跨站防护）
   - `packages/client/ui-primitives/src/BrandWordmark.tsx` — 登录页品牌字标 SVG 的出处
+  - `packages/client/modules/src/index.ts` — `ClientModuleRegistry`（前端插件 boot 图组合、`/plugins/<id>/client.js` 分发、`dsh.client` 扫描）
+  - `packages/client/ui-settings/src/client/contract/slots.ts` — `settings.section` 等设置面板 slot 契约
+  - `packages/client/ui-settings-models/src/client/index.ts:118` — 前端插件向 `settings.section` 注册标签页的范本
+  - `packages/client/tsdown.client.ts` — 前端插件 bundle 的 `clientBundle` preset（`tsdown.config.ts` 的模仿对象）
+  - `packages/bundle/web-app/cordis.patch.yml` — 前端插件「包根行」的官方写法（如 `id: ui-settings / name: '@deepseek-ai/dsh-client-ui-settings'`）
 - `@deepseek-ai/dsh-host-webserver`（`WebServer`/`WebRoute` 类型）是独立 npm 包，源码不在仓库内，看 `node_modules/@deepseek-ai/dsh-host-webserver/` 的类型声明。
 - profile 现状：`~/.dsh/profiles/web/` 以 `link:/home/pax/coding/dsh-web-startup-auth` 安装；`dsh.profile.bundles` 含 `dsh-web-startup-auth`。改动后重启 `dsh web` 生效。
 
@@ -204,5 +223,6 @@ dsh web
 - 文件：`src/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`README.md`（用户文档）。
 - **改源码后必须 `npm run build`**（tsc + tsdown），否则 profile 里跑的还是旧产物；发布前必须保证 `npm pack` 全链路（prepack）通过。
 - 不要为了「省事」改掉 `cordis.patch.yml` 里的 `connection.inject: [webAuth]`——它保证 auth 在 API 路由注册前生效，是安全边界的一部分。
+- 同样不要删 `cordis.patch.yml` 里的**包根行**（`- id: dsh-web-startup-auth / name: dsh-web-startup-auth`）——它是前端插件进 `__DSH_BOOT__` 的前提，删掉后设置面板「认证」标签页消失。
 - 改动认证/信任逻辑时，先读 harness 里对应机制（`PRIVILEGED_METHODS`、`api-request-trust.ts`）再动手，避免破坏「认证即回环信任」的等价性。
 - 登录页品牌元素必须**照搬原版 SVG**（可从 `BrandWordmark.tsx` 提取），不要用 CSS 手绘模拟。
