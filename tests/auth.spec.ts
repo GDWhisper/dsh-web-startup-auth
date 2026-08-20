@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { Duplex } from 'node:stream'
 import { PassThrough } from 'node:stream'
 import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -32,9 +33,34 @@ afterEach(() => {
 })
 
 /** Fake context that records every registered route for handler-level tests. */
-function fakeWebAuthContext(bindHost: string) {
+function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = []) {
   const provided = new Map<string, unknown>()
   const routes: WebRoute[] = []
+  const webServer = {
+    host: bindHost,
+    port: 3080,
+    exact: new Map<string, WebRoute>(),
+    prefixes: new Map<string, WebRoute>(),
+    upgrades: new Map<string, { path: string; handler: (req: unknown, socket: unknown, head: unknown) => unknown }>(),
+    register: (route: WebRoute) => {
+      routes.push(route)
+      const table = route.kind === 'exact' ? webServer.exact : webServer.prefixes
+      table.set(route.path, route)
+      return () => {}
+    },
+    registerUpgrade: (route: { path: string; handler: (req: unknown, socket: unknown, head: unknown) => unknown }) => {
+      webServer.upgrades.set(route.path, route)
+      return () => {}
+    },
+    tapIndex: () => {},
+  }
+  // Routes already registered before web-auth activated (a third-party
+  // plugin that won the activation race): they live in the route tables and
+  // must be wrapped retroactively.
+  for (const route of preRegistered) {
+    webServer.prefixes.set(route.path, route)
+    routes.push(route)
+  }
   const ctx = {
     get: (key: string) => {
       if (key === 'webStartup') return { trustedHosts: [] }
@@ -42,18 +68,14 @@ function fakeWebAuthContext(bindHost: string) {
     },
     provide: (key: string, value: unknown) => { provided.set(key, value) },
     effect: (fn: () => void) => { fn() },
-    webServer: {
-      host: bindHost,
-      port: 3080,
-      register: (route: WebRoute) => { routes.push(route); return () => {} },
-      tapIndex: () => {},
-    },
+    webServer,
     logger: { info: () => {}, warn: () => {} },
   } as unknown as Context
   apply(ctx, {})
   return {
     auth: provided.get('webAuth') as WebAuthService,
     routes,
+    webServer,
   }
 }
 
@@ -149,6 +171,95 @@ describe('web-auth service', () => {
     const { auth } = fakeWebAuthContext('0.0.0.0')
     const expired = sessionCookie('admin', -60)
     expect(auth.authenticate(requestWithCookie(expired))).toBe(false)
+  })
+})
+
+// ── route wrapping coverage (all routes, retroactive + future) ───────────────
+
+/** A plain GET request with configurable Host and session cookie. */
+function httpRequest(opts: { host?: string; cookie?: string }): IncomingMessage {
+  const headers: Record<string, string> = {}
+  if (opts.host !== undefined) headers.host = opts.host
+  if (opts.cookie !== undefined) headers.cookie = opts.cookie
+  return { headers, method: 'GET' } as IncomingMessage
+}
+
+describe('route wrapping coverage', () => {
+  it('retroactively wraps a route registered before web-auth activated', async () => {
+    registerCredentials('admin', 'secret1')
+    const seenHosts: Array<string | undefined> = []
+    const thirdParty: WebRoute = {
+      kind: 'prefix',
+      path: '/api/third-party',
+      handler: async (req, res) => {
+        seenHosts.push(req.headers.host)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end(JSON.stringify({ ok: true }))
+      },
+    }
+    const { routes } = fakeWebAuthContext('0.0.0.0', [thirdParty])
+    const route = findRoute(routes, '/api/third-party')
+
+    // Remote (non-loopback) Host + valid session: rewrites Host to loopback.
+    const ok = jsonResponseCapture()
+    await route.handler(httpRequest({ host: '192.168.5.216:3080', cookie: sessionCookie('admin') }), ok.res)
+    expect(ok.captured.statusCode).toBe(200)
+    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+
+    // No session: rejected.
+    const rejected = jsonResponseCapture()
+    await route.handler(httpRequest({ host: '192.168.5.216:3080' }), rejected.res)
+    expect(rejected.captured.statusCode).toBe(401)
+  })
+
+  it('wraps non-/api routes such as /dsh-automation channels', async () => {
+    registerCredentials('admin', 'secret1')
+    const seenHosts: Array<string | undefined> = []
+    const channel: WebRoute = {
+      kind: 'prefix',
+      path: '/dsh-automation',
+      handler: async (req, res) => {
+        seenHosts.push(req.headers.host)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      },
+    }
+    const { routes, webServer } = fakeWebAuthContext('0.0.0.0')
+    // Register through the wrapped register (future routes).
+    webServer.register(channel)
+    const route = findRoute(routes, '/dsh-automation')
+    const ok = jsonResponseCapture()
+    await route.handler(httpRequest({ host: 'dsh.example.com:3080', cookie: sessionCookie('admin') }), ok.res)
+    expect(ok.captured.statusCode).toBe(200)
+    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+  })
+
+  it('wraps upgrade routes so WebSocket handshakes pass the trust fence', async () => {
+    registerCredentials('admin', 'secret1')
+    const seenHosts: Array<string | undefined> = []
+    const { webServer } = fakeWebAuthContext('0.0.0.0')
+    webServer.registerUpgrade({
+      path: '/api/events.mux',
+      handler: (req) => {
+        seenHosts.push((req as IncomingMessage).headers.host)
+      },
+    })
+    const upgradeRoute = webServer.upgrades.get('/api/events.mux')
+    expect(upgradeRoute).toBeDefined()
+
+    // Remote Host + valid session: rewrites Host to loopback for the fence.
+    const socket = { end: () => {} } as unknown as Duplex
+    upgradeRoute!.handler(
+      httpRequest({ host: 'dsh.example.com:3080', cookie: sessionCookie('admin') }),
+      socket,
+      Buffer.alloc(0),
+    )
+    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+
+    // No session: refused.
+    seenHosts.length = 0
+    upgradeRoute!.handler(httpRequest({ host: 'dsh.example.com:3080' }), socket, Buffer.alloc(0))
+    expect(seenHosts).toEqual([])
   })
 })
 

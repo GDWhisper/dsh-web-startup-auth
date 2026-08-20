@@ -15,7 +15,7 @@ import type { CSSProperties, ReactElement } from 'react'
 import { useCallback, useEffect, useState } from 'react'
 
 /** Services required before the auth tab can be mounted. */
-export const inject = ['slots']
+export const inject = ['slots', 'connection', 'settingsScope']
 
 /** Stable registration id inside the settings section list. */
 const SECTION_ID = 'auth'
@@ -262,6 +262,26 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  // Remote browsers (address bar is a domain or LAN IP) are treated by the
+  // DSH frontend as non-loopback: ui-settings picks a memory-mode settings
+  // mirror based on `connection.isLoopback` (address-bar hostname), so it
+  // never issues the settings RPCs and pages backed by it fail with
+  // "settings are unavailable in this browser". The node half already treats
+  // a valid session as loopback-equivalent (Host/Origin rewriting), so the
+  // browser side is aligned here: override isLoopback, and restore an
+  // already-created mirror (rc.8) to host mode and trigger its read. rc.7 has
+  // no mirror and its models page calls the wire directly — skipped.
+  const connection = ctx.get('connection') as { isLoopback?: boolean } | undefined
+  if (connection !== undefined) connection.isLoopback = true
+  const scope = ctx.get('settingsScope') as
+    | { mirror?: { persistence?: string; load?: () => void; getSnapshot?: () => { view?: unknown } } }
+    | undefined
+  const mirror = scope?.mirror
+  if (mirror !== undefined && mirror.persistence === 'memory' && typeof mirror.load === 'function') {
+    mirror.persistence = 'host'
+    void mirror.load()
+  }
+
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
     id: SECTION_ID,

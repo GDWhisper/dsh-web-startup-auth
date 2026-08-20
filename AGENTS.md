@@ -128,9 +128,13 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 
 **会话认证**：密码用 scrypt（随机盐，64 字节）散列存 `~/.dsh/web-auth.json`（含 `username` / `passwordHash` / `secret`）；会话 cookie `dsh_sid` = `base64url(JSON{u,e}).HMAC-SHA256(secret)`，14 天有效、`HttpOnly` + `SameSite=Lax`。`secret` 随机 32 字节，`auth-reset` 时轮换。
 
-**路由保护顺序（重要）**：`web-auth` 在 `apply` 里同步包装 `webServer.register`（拦截 `/api` 前缀路由做会话校验），所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活。改动 patch 时保持这个注入，否则 API 不设防。
+**路由保护顺序（重要）**：`web-auth` 在 `apply` 里同步包装 `webServer.register` 与 `webServer.registerUpgrade`，所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活。改动 patch 时保持这个注入，否则 API 不设防。
 
-**特权 API 回环放行**：harness 的 `packages/client/connection/src/index.ts` 把 `settings.*`、`credentials.*`、`agentPreset.*`、`llm.discoverModels` 等 `PRIVILEGED_METHODS` 限制为**仅回环可访问**（注释原文：`until a real authentication layer exists`）。远程访问时这些接口返回 403。`web-auth` 的解法：认证通过后把请求 `Host`/`Origin` 头临时改写为 `127.0.0.1:<port>` 再转发给下游 handler（处理完还原）。**有效会话即认证层，等价于回环信任。**
+**覆盖范围（所有路由，含事后追溯）**：包装**不只限 `/api` 前缀**——所有经 `webServer.register`/`registerUpgrade` 注册的路由（含第三方插件的非 `/api` channel，如 `/dsh-automation`、技能管理器）都做「认证 + Host/Origin 回环改写」；只有 `/login` 与 `/api/auth/*` 保持匿名。**关键坑**：cordis 的激活顺序**不是 bundle/树顺序**（动态 import 完成顺序不定，实测无论 bundle 怎么排，第三方插件都可能先于 web-auth 激活），所以包装必须在 apply 时**遍历 webserver 路由表（`exact`/`prefixes`/`upgrades` Map）把已注册的路由事后包装**（WeakSet 防重复），再包装未来的注册。只包装 `register` 而不做事后追溯时：先激活插件的路由（技能管理器 `/api/dsh-skills-manager` → `forbidden host`）、非 `/api` channel（`/dsh-automation/snapshot` → 403 `forbidden`）、以及 WebSocket 升级（`/api/events.*` → 403，事件流连不上）都会对远程用户报错。
+
+**特权 API 回环放行**：harness 的 `packages/client/connection/src/index.ts` 把 `settings.*`、`credentials.*`、`agentPreset.*`、`llm.discoverModels` 等 `PRIVILEGED_METHODS` 限制为**仅回环可访问**（注释原文：`until a real authentication layer exists`）；`rpc-host.ts` 的 `authority: "loopback"` channel（第三方 RPC）同样只认回环 Host。远程访问时这些接口返回 403。`web-auth` 的解法：认证通过后把请求 `Host`/`Origin` 头临时改写为 `127.0.0.1:<port>` 再转发给下游 handler（处理完还原）。**有效会话即认证层，等价于回环信任。**
+
+**浏览器端 scope gate（rc.8 由前端插件化解）**：DSH 前端 `connection.isLoopback` 由**浏览器地址栏 hostname** 判定（`packages/client/connection/src/client/index.ts:106`），远程浏览器（域名/IP）恒为 false → `SettingsScopeController` 用 memory 模式（`packages/client/ui-settings/src/client/settings-scope.ts:60,251`）。**rc.8 变本加厉**：Models 页（提供方目录）不再直连 `settings.describe`，改走 `ctx.settingsScope.describe()` 的**共享镜像**（`ui-settings/src/client/settings-scope.ts:1150`），镜像 persistence 由 `connection.isLoopback` 决定（`:1340`）——远程浏览器下镜像为 memory 模式、`settings.describe` 根本不发 RPC，Models 页抛 **"settings are unavailable in this browser"**（正是用户报的文案，rc.7 全树无此文本）。**解法（`src/client/index.tsx`）**：前端插件覆盖 `connection.isLoopback = true`，并把已创建的 mirror（`settingsScope.mirror`）从 `memory` 恢复为 `host` 后触发 `load()`——后端改写放行使读取成功，Models 页与后续 bind 的 scope 全部可用。注意：**已绑定**的 memory 模式 scope（如插件配置页）本会话内不自动恢复，需刷新页面（重新 apply 时 mirror 已 host）；mirror 字段（`persistence`/`load`）为 rc.8 内部结构，版本敏感，用可选链防御（rc.7 无 mirror，跳过）。
 
 **`crypto.randomUUID` polyfill**：通过局域网 IP + 明文 HTTP 访问时页面处于非安全上下文，`crypto.randomUUID` 不存在，DSH 前端每个 RPC 都会抛错（表现为 "WebSocket is closed..." + 无限重连）。`web-auth` 通过 `webServer.tapIndex` 向 SPA 注入基于 `crypto.getRandomValues` 的 polyfill，在客户端 bundle 运行前生效。
 
@@ -143,7 +147,7 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 - **必须插「包根行」**：`ClientModuleRegistry` 按 loader entry 的 `name`（patch 里 insert 的 `name` 字段）当包名去解析 `package.json` 读 `dsh.client`，所以 `cordis.patch.yml` 里除了 `remote-web-startup`/`web-auth` 两个子路径行，还插了一条 **`- id: dsh-web-startup-auth / name: dsh-web-startup-auth`**（纯包名）。删掉它标签页就不会出现。`src/index.ts` 的空 `apply()` 就是为这个包根行存在的（模仿 `ui-settings` 的 node half）。
 - `lib/client.js` 由 `tsdown`（`tsdown.config.ts`，模仿 harness 的 `clientBundle` preset）打包，格式为 `window.__ModuleLoader__.load({ id, factory })`；`react`/`@deepseek-ai/cordis`/`ui-slots` 保持 external（loader 模块表提供），其余依赖内联。
 - 组件 props 必须匹配 `PropsRuntime<'settings.section'>`（owner share 是 `{ close }`），不能用裸 `SettingsSectionOwnerProps`。
-- 前端插件只需注入 `slots` 服务；标签页调 `/api/auth/*` 走普通 `fetch`，不走 connection RPC。
+- 前端插件注入 `slots`/`connection`/`settingsScope` 三个服务：`connection` 与 `settingsScope` 用于覆盖 `isLoopback` 和恢复 settings mirror（见「浏览器端 scope gate」）；标签页调 `/api/auth/*` 走普通 `fetch`，不走 connection RPC。
 - 改了 `cordis.patch.yml` 或前端插件后**必须重启 `dsh web`**（patch 按包名缓存、不热加载）。
 
 ### 核心代码路径

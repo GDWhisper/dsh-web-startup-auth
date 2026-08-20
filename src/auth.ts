@@ -17,7 +17,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type { IncomingMessage, ServerResponse } from 'node:http'
-import type { WebServer, WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { WEB_STARTUP_SERVICE } from './startup.ts'
 import { LOGIN_PAGE_HTML } from './login-page.ts'
 import {
@@ -532,50 +532,115 @@ export function apply(ctx: Context, _config: Config): void {
     return html.replace('</head>', `${script}</head>`)
   })
 
-  // ── 4. Wrap webServer.register to protect /api routes ─────────────────────
+  // ── 4. Wrap webServer.register / registerUpgrade to protect every route,
+  //       presenting authenticated remote requests as loopback ─────────────
+  // dsh's client-connection gates its privileged /api domains
+  // (settings.*, credentials.*, agentPreset.*, llm.discoverModels, …) and
+  // third-party `authority: "loopback"` RPC channels (/dsh-automation, skill
+  // managers, …) to loopback-origin requests, because the stock deployment
+  // has no authentication layer. A valid session IS that layer, so present
+  // authenticated remote requests as loopback: rewrite the authority headers
+  // for the duration of the downstream handler. Loopback requests pass
+  // through untouched.
+  //
+  // The wrapper must cover routes registered BEFORE this plugin activated:
+  // cordis activation order is not the bundle/tree order (dynamic imports
+  // finish out of order), so third-party plugins can register their routes
+  // before web-auth runs. Their route objects live in the webserver's route
+  // tables, so wrap them retroactively here.
   const originalRegister = webServer.register.bind(webServer)
+  const originalRegisterUpgrade = webServer.registerUpgrade.bind(webServer)
   // Loopback authority for this server (host:port), used to present
   // authenticated remote requests as loopback to dsh's own trust fences.
   const loopbackAuthority = () => `127.0.0.1:${webServer.port}`
-  webServer.register = (route: WebRoute) => {
-    // Protect all /api prefix routes except auth endpoints
-    if (route.path.startsWith('/api') && !route.path.startsWith('/api/auth/')) {
-      const originalHandler = route.handler
-      route.handler = async (req, res) => {
-        if (!isAuthorized(req, bindHost)) {
-          jsonResponse(res, 401, { error: 'unauthorized' })
-          return
-        }
-        // dsh's client-connection gates its privileged /api domains
-        // (settings.*, credentials.*, agentPreset.*, llm.discoverModels, …)
-        // to loopback-origin requests, because the stock deployment has no
-        // authentication layer. A valid session IS that layer, so present
-        // authenticated remote requests as loopback: rewrite the authority
-        // headers for the duration of the downstream handler. Loopback
-        // requests pass through untouched.
-        if (bindHost === ALL_INTERFACES_HOST && !isLoopbackAuthority(req.headers.host)) {
-          const originalHost = req.headers.host
-          const originalOrigin = req.headers.origin
-          req.headers.host = loopbackAuthority()
-          if (originalOrigin !== undefined) {
-            req.headers.origin = `http://${loopbackAuthority()}`
-          }
-          try {
-            await originalHandler(req, res)
-          } finally {
-            req.headers.host = originalHost
-            if (originalOrigin !== undefined) {
-              req.headers.origin = originalOrigin
-            } else {
-              delete req.headers.origin
-            }
-          }
-          return
-        }
-        await originalHandler(req, res)
+  const wrappedHandlers = new WeakSet<WebRoute>()
+  const wrappedUpgrades = new WeakSet<WebUpgradeRoute>()
+  /** Routes that must stay anonymous: the login page and our own auth API. */
+  const isPublicRoute = (path: string): boolean =>
+    path === '/login' || path.startsWith('/api/auth/')
+
+  const wrapHandler = (route: WebRoute): void => {
+    if (wrappedHandlers.has(route) || isPublicRoute(route.path)) return
+    wrappedHandlers.add(route)
+    const originalHandler = route.handler
+    route.handler = async (req, res) => {
+      if (!isAuthorized(req, bindHost)) {
+        jsonResponse(res, 401, { error: 'unauthorized' })
+        return
       }
+      if (bindHost === ALL_INTERFACES_HOST && !isLoopbackAuthority(req.headers.host)) {
+        const originalHost = req.headers.host
+        const originalOrigin = req.headers.origin
+        req.headers.host = loopbackAuthority()
+        if (originalOrigin !== undefined) {
+          req.headers.origin = `http://${loopbackAuthority()}`
+        }
+        try {
+          await originalHandler(req, res)
+        } finally {
+          req.headers.host = originalHost
+          if (originalOrigin !== undefined) {
+            req.headers.origin = originalOrigin
+          } else {
+            delete req.headers.origin
+          }
+        }
+        return
+      }
+      await originalHandler(req, res)
     }
+  }
+
+  const wrapUpgradeHandler = (route: WebUpgradeRoute): void => {
+    if (wrappedUpgrades.has(route) || isPublicRoute(route.path)) return
+    wrappedUpgrades.add(route)
+    const originalHandler = route.handler
+    route.handler = (req, socket, head) => {
+      if (!isAuthorized(req, bindHost)) {
+        socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
+        return
+      }
+      if (bindHost === ALL_INTERFACES_HOST && !isLoopbackAuthority(req.headers.host)) {
+        const originalHost = req.headers.host
+        const originalOrigin = req.headers.origin
+        req.headers.host = loopbackAuthority()
+        if (originalOrigin !== undefined) {
+          req.headers.origin = `http://${loopbackAuthority()}`
+        }
+        try {
+          return originalHandler(req, socket, head)
+        } finally {
+          req.headers.host = originalHost
+          if (originalOrigin !== undefined) {
+            req.headers.origin = originalOrigin
+          } else {
+            delete req.headers.origin
+          }
+        }
+      }
+      return originalHandler(req, socket, head)
+    }
+  }
+
+  // Retroactively wrap routes that were already registered before this
+  // plugin activated (third-party plugins may have won the activation race).
+  const tables = webServer as unknown as {
+    exact?: Map<string, WebRoute>
+    prefixes?: Map<string, WebRoute>
+    upgrades?: Map<string, WebUpgradeRoute>
+  }
+  for (const route of tables.exact?.values() ?? []) wrapHandler(route)
+  for (const route of tables.prefixes?.values() ?? []) wrapHandler(route)
+  for (const route of tables.upgrades?.values() ?? []) wrapUpgradeHandler(route)
+
+  // Wrap routes registered from now on.
+  webServer.register = (route: WebRoute) => {
+    wrapHandler(route)
     return originalRegister(route)
+  }
+  webServer.registerUpgrade = (route: WebUpgradeRoute) => {
+    wrapUpgradeHandler(route)
+    return originalRegisterUpgrade(route)
   }
 
   // ── 5. Provide the auth service ───────────────────────────────────────────
