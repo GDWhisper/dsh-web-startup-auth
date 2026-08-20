@@ -91,4 +91,4 @@ npm run build       # tsc -p tsconfig.json + tsdown, output to lib/
 
 ## License
 
-[MIT](./LICENSE) (if no LICENSE file is present in the repo, the MIT declaration in package.json applies)
+[MIT](./LICENSE)

@@ -90,4 +90,4 @@ npm run build       # tsc -p tsconfig.json + tsdown，产物输出到 lib/
 
 ## 许可证
 
-[MIT](./LICENSE)（仓库内未含 LICENSE 文件时，默认按 package.json 的 MIT 声明授权）
+[MIT](./LICENSE)
