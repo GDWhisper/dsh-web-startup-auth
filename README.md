@@ -31,8 +31,8 @@ npm install        # 安装构建依赖（typescript 等）
 npm run build      # 编译 src/ 到 lib/（插件运行时加载 lib/ 下的产物）
 dsh plugin --profile web add .
 
-# 方式二：从 npm registry 安装
-dsh plugin --profile web add dsh-web-startup-auth
+# 方式二：从 npm registry 安装（已装过旧版本时执行同一条命令即可升级）
+dsh plugin --profile web add dsh-web-startup-auth@latest
 ```
 
 > `dsh plugin` 是 pnpm 转发器，`--profile <name>` 必填；`add .` 会把当前目录以 `link:` 方式装进 profile。

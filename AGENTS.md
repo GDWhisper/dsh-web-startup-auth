@@ -94,7 +94,7 @@ dsh 的 profile 配置由多层 patch 叠加合成，`cordis.patch.yml` 就是�
 ```sh
 cd /path/to/plugin-package
 dsh plugin --profile web add .          # 本地源码：写 bundles + link: 依赖 + pnpm install
-dsh plugin --profile web add dsh-web-startup-auth   # 已发布到 npm registry 时
+dsh plugin --profile web add dsh-web-startup-auth@latest   # 已发布到 npm registry 时；升级旧版本必须显式 @<版本> 或 @latest——不带版本号时 pnpm 保留现有 spec（0.1.0 或 link:）不动
 dsh plugin --profile web remove <package-name>      # 卸载
 dsh web                                     # 启动（新插件需重启生效）
 dsh --profile web --dump-config            # 打印组合后的完整插件树（排查 patch 是否生效）

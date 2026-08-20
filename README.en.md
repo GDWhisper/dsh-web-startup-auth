@@ -31,8 +31,8 @@ npm install        # install build dependencies (typescript etc.)
 npm run build      # compile src/ to lib/ (the runtime loads lib/ artifacts)
 dsh plugin --profile web add .
 
-# Option 2: from the npm registry
-dsh plugin --profile web add dsh-web-startup-auth
+# Option 2: from the npm registry (re-run the same command to upgrade an existing install)
+dsh plugin --profile web add dsh-web-startup-auth@latest
 ```
 
 > `dsh plugin` forwards to pnpm and requires `--profile <name>`; `add .` installs the current directory as a `link:` dependency.
