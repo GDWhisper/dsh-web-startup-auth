@@ -73,7 +73,7 @@ dsh web --host 0.0.0.0
 - **登录防护**：登录失败按客户端 IP 限速——连续 5 次失败锁定 30 秒（纯内存、无持久化）；注册要求密码至少 8 个字符。限速覆盖 `/api/auth/login` 与 `/api/auth/change-password`（旧密码错误同样计次）。如需更严格防护请在反向代理层增加通用限速。
 - **凭据文件权限**：`~/.dsh/web-auth.json`（含密码哈希与会话签名密钥）以 `0600` 保存，目录以 `0700` 创建；插件启动时会自动修复旧版本遗留的过宽权限。
 - **`--trusted-host`**：该参数仅为与原版 CLI 兼容而保留透传，**不参与本插件认证判断**——远程客户端一律需要有效会话，不存在"受信主机免登录"。
-- **上游兼容层（dsh ≥ rc.8）**：dsh rc.8 起，设置面板依赖**前端 settings mirror** 的功能（提供方目录、插件配置表单）在远程浏览器下原本会报 `settings are unavailable in this browser`——DSH 前端用**浏览器地址栏 hostname** 判定是否回环，远程访问恒为非回环，mirror 走内存模式不发 RPC。本插件的**前端插件**已覆盖该判定并把 mirror 恢复为 host 模式（配合后端回环放行），使这些页面可用；**已在会话中打开过的页面需刷新一次**。该兼容层依赖 dsh 内部结构（`settingsScope.mirror`），以 rc.8 为准验证，上游改动可能需要同步更新。
+- **上游兼容层（dsh ≥ rc.8）**：dsh rc.8 起，设置面板依赖**前端 settings mirror** 的功能（提供方目录、插件配置表单）在远程浏览器下原本会报 `settings are unavailable in this browser`——DSH 前端用**浏览器地址栏 hostname** 判定是否回环，远程访问恒为非回环，mirror 走内存模式不发 RPC，插件配置卡片整个不渲染。本插件通过 `webServer.tapIndex` 向 SPA 注入脚本：在模块系统就绪后包装每个前端插件的 `apply`，于 connection 插件激活返回的瞬间把 `connection.isLoopback` 覆盖为恒 `true`（配合后端回环放行）——**早于任何 settings scope 的绑定**，因此 mirror 与所有配置 scope 都以 host 模式创建，无需刷新页面。前端插件另保留一份防御性覆盖与 mirror 兜底。该兼容层依赖 dsh 内部结构（`window.__ModuleLoader__`、`settingsScope.mirror`），以 rc.8 为准验证，上游改动可能需要同步更新。
 
 ## 开发
 

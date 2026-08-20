@@ -9,7 +9,19 @@
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ReactElement } from 'react';
-/** Services required before the auth tab can be mounted. */
+/**
+ * Services required before the main body can be mounted. The PRIMARY timing
+ * guarantee comes from the node half (`src/auth.ts`): a script injected into
+ * the SPA index wraps `window.__ModuleLoader__.load` and flips
+ * `connection.isLoopback` to true the moment the connection plugin's apply
+ * returns — before cordis notifies any dependent fiber — so the settings
+ * mirror and every scope are built in host mode regardless of this plugin's
+ * own activation order (bundle loads finish out of order). This root plugin
+ * still injects only `connection` and repeats the override as a defensive
+ * layer: cordis activates a fiber as soon as its inject set is ready, and
+ * connection is the earliest service in the boot graph, so this apply runs
+ * early enough to matter even if the injected hook was ever lost.
+ */
 export declare const inject: string[];
 /**
  * The settings tab content. Sign-out navigates back to the login page;

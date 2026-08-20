@@ -517,6 +517,63 @@ export function apply(ctx: Context, _config: Config): void {
       return h
     }
   }
+  // DSH's browser half treats the address-bar hostname as the trust source
+  // (connection.isLoopback): a remote browser (LAN IP / domain) is
+  // 'non-loopback', so ui-settings builds its describe mirror in memory mode
+  // and every settingsScope.bind() freezes its scope in memory mode - those
+  // scopes never derive, so plugin-configuration cards render nothing. The
+  // node half already treats a valid session as loopback-equivalent (see the
+  // Host/Origin rewriting below), so align the browser side here. The
+  // override must land BEFORE the mirror is constructed and any scope binds,
+  // which cannot be guaranteed by our own client plugin's activation order
+  // (bundle loads finish out of order). Instead, wrap the module loader so
+  // that the connection plugin's apply - the earliest service in the boot
+  // graph - flips isLoopback to true the moment it returns, before cordis
+  // notifies any dependent fiber.
+  function installIsLoopbackOverride() {
+    var loader = window.__ModuleLoader__
+    if (!loader || loader.__authIsLoopbackHooked) return false
+    // The HTML-installed facade starts in "queue" mode and only becomes
+    // "live" once ClientModuleSystem.create() replaces load() with the
+    // registering function. Hook that live load; wrapping the queue-mode
+    // load would be discarded by the replacement.
+    if (loader.mode !== 'live') return false
+    loader.__authIsLoopbackHooked = true
+    var origLoad = loader.load.bind(loader)
+    loader.load = function (handoff) {
+      var factory = handoff && handoff.factory
+      if (typeof factory === 'function') {
+        handoff.factory = function (require) {
+          var exports = factory(require)
+          var apply = exports && exports.apply
+          if (typeof apply === 'function') {
+            exports.apply = function (ctx) {
+              var result = apply(ctx)
+              try {
+                var connection = ctx && ctx.get && ctx.get('connection')
+                if (connection) {
+                  Object.defineProperty(connection, 'isLoopback', {
+                    configurable: true,
+                    get: function () { return true }
+                  })
+                }
+              } catch (error) {}
+              return result
+            }
+          }
+          return exports
+        }
+      }
+      return origLoad(handoff)
+    }
+    return true
+  }
+  // Keep retrying: the boot entry may load asynchronously, so the module
+  // loader can appear after this inline script runs.
+  function tryInstallIsLoopbackOverride() {
+    if (!installIsLoopbackOverride()) setTimeout(tryInstallIsLoopbackOverride, 0)
+  }
+  tryInstallIsLoopbackOverride()
 })()
 ;(async function () {
   try {
