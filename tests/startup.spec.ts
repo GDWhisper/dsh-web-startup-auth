@@ -95,7 +95,7 @@ describe('remote web-startup', () => {
     const result = runStartup(ctx, ['--host', '0.0.0.0', '--port', '8080'])
     expect(result.error).toBeUndefined()
     const values = ctx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined
-    expect(values).toEqual({ host: '0.0.0.0', port: 8080, trustedHosts: [] })
+    expect(values).toEqual({ host: '0.0.0.0', port: 8080, trustedHosts: [], openBrowser: true })
   })
 
   it('keeps trusted-host parsing', () => {
@@ -105,7 +105,16 @@ describe('remote web-startup', () => {
     expect(values).toEqual({
       host: '127.0.0.1',
       trustedHosts: ['lab.internal', '10.0.0.8'],
+      openBrowser: true,
     })
+  })
+
+  it('accepts --no-open and flips openBrowser to false', () => {
+    const ctx = makeFakeContext()
+    const result = runStartup(ctx, ['--host', '0.0.0.0', '--no-open'])
+    expect(result.error).toBeUndefined()
+    const values = ctx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined
+    expect(values).toEqual({ host: '0.0.0.0', trustedHosts: [], openBrowser: false })
   })
 
   it('does not provide webStartup when the auth-reset subcommand is invoked', async () => {

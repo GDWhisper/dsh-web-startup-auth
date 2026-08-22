@@ -34,6 +34,8 @@ export interface WebStartupValues {
     port?: number;
     /** Explicit `--trusted-host` authorities, in argument order (passthrough for downstream consumers; not consulted by web-auth). */
     trustedHosts: string[];
+    /** `--no-open` support: whether the default browser should be opened (default true). */
+    openBrowser?: boolean;
 }
 /** Options for the `auth-reset` subcommand. */
 export interface AuthResetOptions {

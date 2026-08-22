@@ -45,6 +45,8 @@ export interface WebStartupValues {
   port?: number
   /** Explicit `--trusted-host` authorities, in argument order (passthrough for downstream consumers; not consulted by web-auth). */
   trustedHosts: string[]
+  /** `--no-open` support: whether the default browser should be opened (default true). */
+  openBrowser?: boolean
 }
 
 /** The web flag family, as commander parsed it. */
@@ -52,6 +54,7 @@ interface WebOptions {
   host?: string
   port?: string
   trustedHost?: string[]
+  open?: boolean
 }
 
 /** Options for the `auth-reset` subcommand. */
@@ -66,11 +69,13 @@ function webCommand(): Command {
     .description('Serve the DeepSeek Harness browser UI (remote-capable).')
     .helpOption('-h, --help', 'show this help')
     .option('--host <host>', 'bind host (0.0.0.0 allowed when the auth plugin is configured)')
+    .option('--no-open', 'do not open the Web UI in the default browser')
     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
     .option('--trusted-host <authority...>', 'passthrough for the stock startup\'s browser-trust authorities (kept for CLI compatibility; not consulted by web-auth — sessions cover all remote clients)')
     .addHelpText('after', `
 Examples:
   dsh --profile web                          serve on the composed host and port
+  dsh --profile web --no-open                serve without opening a browser
   dsh --profile web --host 0.0.0.0 --port 8080   serve on all interfaces (requires auth)
   dsh --profile web auth-reset               reset the web-auth password (invalidates all sessions)
 `)
@@ -154,6 +159,7 @@ export function apply(ctx: Context): void {
       program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
     }
     ctx.provide(WEB_STARTUP_SERVICE, {
+      openBrowser: options.open,
       ...options.host !== undefined && { host: options.host },
       ...options.port !== undefined && { port: Number(options.port) },
       trustedHosts: options.trustedHost ?? [],
