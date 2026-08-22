@@ -1,0 +1,18 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "packageRules": [
+    {
+      "description": "dsh packages publish real releases on the `next` dist-tag (latest is a placeholder); track that channel and bump declared ranges so pre-release ranges keep matching across patch boundaries.",
+      "matchPackageNames": [
+        "@deepseek-ai/dsh-cmdline",
+        "@deepseek-ai/dsh-host-webserver",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "followTag": "next",
+      "rangeStrategy": "bump"
+    }
+  ]
+}
