@@ -1,6 +1,6 @@
 {
   "name": "dsh-web-startup-auth",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DSH remote-aware web-startup replacement + username/password auth plugin: allows --host 0.0.0.0 when paired with the auth plugin",
   "type": "module",
   "main": "lib/index.js",
