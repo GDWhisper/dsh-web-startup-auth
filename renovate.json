@@ -1,9 +1,10 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended"],
+  "dependencyDashboard": true,
   "packageRules": [
     {
-      "description": "dsh packages publish real releases on the `next` dist-tag (latest is a placeholder); track that channel and bump declared ranges so pre-release ranges keep matching across patch boundaries.",
+      "description": "dsh packages publish real releases on the `next` dist-tag (latest is a placeholder 0.0.1-rc.1); track that channel and bump declared ranges so pre-release ranges keep matching across patch boundaries. Deliberately excludes @deepseek-ai/cordis and @deepseek-ai/schemastery: their `latest` is a real release (4.0.1 / 3.18.1) while `next` is an older prerelease, so following `next` there would downgrade them.",
       "matchPackageNames": [
         "@deepseek-ai/dsh-cmdline",
         "@deepseek-ai/dsh-host-webserver",
