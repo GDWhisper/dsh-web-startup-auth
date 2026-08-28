@@ -12,6 +12,13 @@
  *   The plugin wraps `ctx.webServer.register` to inject a session check into
  *   every `/api` prefix route (except `/api/auth/*`). The `connection` row
  *   must inject `webAuth` so it activates after this plugin.
+ *
+ * Trust model:
+ *   A request is trusted either by a valid session cookie, or by being a
+ *   genuine loopback request — loopback peer address *and* loopback `Host`
+ *   (see `isTrustedOrigin`). The bind address alone is not a trust signal:
+ *   binding to 127.0.0.1 behind a reverse proxy still serves remote clients,
+ *   whose forwarded `Host` names the public domain.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -52,14 +59,12 @@ export const Config: z<Config> = z.object({})
 /** The auth service provided to transport/tool layers. */
 export interface WebAuthService {
   /**
-   * True when the request carries a valid session cookie.
-   * Loopback-only mode is implicitly trusted (no session required).
+   * True when the request carries a valid session cookie, or when it is a
+   * genuine loopback request (loopback peer address *and* loopback `Host`),
+   * which is implicitly trusted and needs no session.
    */
   authenticate(request: IncomingMessage): boolean
 }
-
-/** All-interfaces bind literal from the webserver schema. */
-const ALL_INTERFACES_HOST = '0.0.0.0'
 
 /** Session cookie name. */
 const SESSION_COOKIE = 'dsh_sid'
@@ -237,13 +242,13 @@ function jsonResponse(res: ServerResponse, status: number, data: Record<string, 
 }
 
 /**
- * Check if the request is authorized (loopback or valid session cookie).
+ * Check if the request is authorized (a genuine loopback request or a valid
+ * session cookie).
  * @param req - the incoming HTTP request.
- * @param bindHost - the server's bind host.
  * @returns `true` if the request is allowed.
  */
-function isAuthorized(req: IncomingMessage, bindHost: string): boolean {
-  if (bindHost !== ALL_INTERFACES_HOST) return true
+function isAuthorized(req: IncomingMessage): boolean {
+  if (isTrustedOrigin(req)) return true
   return validateSessionCookie(req) !== undefined
 }
 
@@ -267,6 +272,50 @@ function isLoopbackAuthority(host: string | undefined): boolean {
   const parts = hostname.split('.')
   return parts.length === 4 && parts[0] === '127' &&
     parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
+/**
+ * Whether a TCP peer address is a loopback address.
+ *
+ * Only the socket's own peer address counts. `X-Forwarded-For` and friends are
+ * client-supplied headers and are never consulted: a reverse proxy that wants
+ * its clients treated as remote has to forward the real `Host`, which is the
+ * signal the loopback check below reads.
+ * @param address - `req.socket.remoteAddress`, if any.
+ * @returns `true` for 127/8 IPv4 (including IPv4-mapped IPv6) and IPv6 loopback.
+ */
+function isLoopbackRemoteAddress(address: string | undefined): boolean {
+  if (address === undefined) return false
+  // Node reports IPv4 peers on a dual-stack socket as `::ffff:127.0.0.1`.
+  const normalized = address.startsWith('::ffff:') ? address.slice(7) : address
+  if (normalized === '::1') return true
+  const parts = normalized.split('.')
+  return parts.length === 4 && parts[0] === '127' &&
+    parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+}
+
+/**
+ * Whether the request itself is a loopback request, and therefore implicitly
+ * trusted without a session.
+ *
+ * Both halves are required, because each one alone is forgeable or
+ * insufficient:
+ * - The `Host` header alone is forgeable: an attacker reaching the server over
+ *   the LAN can send `Host: 127.0.0.1`. The socket's peer address cannot be
+ *   forged by anyone who is not already on the loopback interface.
+ * - The peer address alone misses reverse proxies: a proxy on the same host
+ *   connects from 127.0.0.1 while its client is remote, so the forwarded
+ *   `Host` (the external domain) is what distinguishes that case from a
+ *   genuine local browser.
+ *
+ * A host-local caller that reaches the server over loopback *and* claims a
+ * loopback authority is already a local user, so implicit trust is safe.
+ * @param req - the incoming HTTP request.
+ * @returns `true` when the request needs no session cookie.
+ */
+function isTrustedOrigin(req: IncomingMessage): boolean {
+  return isLoopbackRemoteAddress(req.socket?.remoteAddress) &&
+    isLoopbackAuthority(req.headers.host)
 }
 
 /**
@@ -299,11 +348,12 @@ export function apply(ctx: Context, _config: Config): void {
       path: '/api/auth/status',
       handler: async (req, res) => {
         const registered = hasCredentials()
-        const authenticated = isAuthorized(req, bindHost)
-        // Username is only exposed once authenticated (loopback or valid session).
-        const username = authenticated ? (bindHost === ALL_INTERFACES_HOST
-          ? validateSessionCookie(req)
-          : getUsername()) : undefined
+        const authenticated = isAuthorized(req)
+        // Username is only exposed once authenticated: a trusted (loopback)
+        // origin gets the stored username, a remote caller only its own session.
+        const username = authenticated
+          ? (isTrustedOrigin(req) ? getUsername() : validateSessionCookie(req))
+          : undefined
         jsonResponse(res, 200, { registered, authenticated, username })
       },
     },
@@ -422,12 +472,12 @@ export function apply(ctx: Context, _config: Config): void {
           res.end()
           return
         }
-        // Change-password requires an authenticated caller: on 0.0.0.0 the
-        // session cookie (already validated by isAuthorized); on loopback the
-        // implicit trust applies. Rate limiting mirrors the login endpoint.
+        // Change-password requires an authenticated caller: a session cookie
+        // for a remote caller, or the implicit trust granted to a genuine
+        // loopback request. Rate limiting mirrors the login endpoint.
         try {
           pruneLoginFailures()
-          if (!isAuthorized(req, bindHost)) {
+          if (!isAuthorized(req)) {
             jsonResponse(res, 401, { error: '未登录或会话已过期' })
             return
           }
@@ -448,9 +498,9 @@ export function apply(ctx: Context, _config: Config): void {
           }
           // Capture the identity BEFORE changePassword: it rotates the signing
           // secret, after which the old session cookie no longer verifies.
-          const username = bindHost === ALL_INTERFACES_HOST
-            ? validateSessionCookie(req)
-            : getUsername()
+          const username = isTrustedOrigin(req)
+            ? getUsername()
+            : validateSessionCookie(req)
           if (username === undefined) {
             jsonResponse(res, 401, { error: '未登录或会话已过期' })
             return
@@ -579,7 +629,12 @@ export function apply(ctx: Context, _config: Config): void {
   try {
     var res = await fetch('/api/auth/status')
     var data = await res.json()
-    if (window.location.pathname !== '/login' && (!data.registered || !data.authenticated)) {
+    // Redirect only when this very request is unauthorized. The
+    // authenticated flag already accounts for loopback trust, so a local
+    // browser (which needs no credentials at all) and an unregistered
+    // deployment reached over the LAN must not both be sent to /login: gating
+    // on "registered" as well used to bounce /login and / into each other.
+    if (window.location.pathname !== '/login' && !data.authenticated) {
       window.location.replace('/login')
       return
     }
@@ -599,6 +654,12 @@ export function apply(ctx: Context, _config: Config): void {
   // authenticated remote requests as loopback: rewrite the authority headers
   // for the duration of the downstream handler. Loopback requests pass
   // through untouched.
+  //
+  // The rewrite is keyed off the requested authority, not the bind host: an
+  // authenticated request also reaches us through a reverse proxy that binds
+  // dsh to loopback and forwards its own public Host, and that caller needs
+  // the same rewrite to clear `PRIVILEGED_METHODS` (which gates on loopback
+  // Host with an empty trustedHosts list).
   //
   // The wrapper must cover routes registered BEFORE this plugin activated:
   // cordis activation order is not the bundle/tree order (dynamic imports
@@ -621,11 +682,11 @@ export function apply(ctx: Context, _config: Config): void {
     wrappedHandlers.add(route)
     const originalHandler = route.handler
     route.handler = async (req, res) => {
-      if (!isAuthorized(req, bindHost)) {
+      if (!isAuthorized(req)) {
         jsonResponse(res, 401, { error: 'unauthorized' })
         return
       }
-      if (bindHost === ALL_INTERFACES_HOST && !isLoopbackAuthority(req.headers.host)) {
+      if (!isLoopbackAuthority(req.headers.host)) {
         const originalHost = req.headers.host
         const originalOrigin = req.headers.origin
         req.headers.host = loopbackAuthority()
@@ -653,11 +714,11 @@ export function apply(ctx: Context, _config: Config): void {
     wrappedUpgrades.add(route)
     const originalHandler = route.handler
     route.handler = (req, socket, head) => {
-      if (!isAuthorized(req, bindHost)) {
+      if (!isAuthorized(req)) {
         socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
         return
       }
-      if (bindHost === ALL_INTERFACES_HOST && !isLoopbackAuthority(req.headers.host)) {
+      if (!isLoopbackAuthority(req.headers.host)) {
         const originalHost = req.headers.host
         const originalOrigin = req.headers.origin
         req.headers.host = loopbackAuthority()
@@ -703,7 +764,7 @@ export function apply(ctx: Context, _config: Config): void {
   // ── 5. Provide the auth service ───────────────────────────────────────────
   const service: WebAuthService = {
     authenticate(request) {
-      return isAuthorized(request, bindHost)
+      return isAuthorized(request)
     },
   }
 

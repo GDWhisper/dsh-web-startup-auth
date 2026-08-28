@@ -12,6 +12,13 @@
  *   The plugin wraps `ctx.webServer.register` to inject a session check into
  *   every `/api` prefix route (except `/api/auth/*`). The `connection` row
  *   must inject `webAuth` so it activates after this plugin.
+ *
+ * Trust model:
+ *   A request is trusted either by a valid session cookie, or by being a
+ *   genuine loopback request — loopback peer address *and* loopback `Host`
+ *   (see `isTrustedOrigin`). The bind address alone is not a trust signal:
+ *   binding to 127.0.0.1 behind a reverse proxy still serves remote clients,
+ *   whose forwarded `Host` names the public domain.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
@@ -32,8 +39,9 @@ export declare const Config: z<Config>;
 /** The auth service provided to transport/tool layers. */
 export interface WebAuthService {
     /**
-     * True when the request carries a valid session cookie.
-     * Loopback-only mode is implicitly trusted (no session required).
+     * True when the request carries a valid session cookie, or when it is a
+     * genuine loopback request (loopback peer address *and* loopback `Host`),
+     * which is implicitly trusted and needs no session.
      */
     authenticate(request: IncomingMessage): boolean;
 }

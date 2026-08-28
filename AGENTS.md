@@ -120,7 +120,7 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 原版 `@deepseek-ai/dsh-web-app/startup`（`packages/bundle/web-app/src/startup.ts:69`）对 `--host 0.0.0.0` **硬拒绝**（`program.error('... intentionally not supported yet for safety ...')`）。本插件用两个子模块替换并补上认证：
 
 1. **`remote-web-startup`**：行为与原版一致，只是**删掉 0.0.0.0 拒绝**。安全责任转移到 auth 插件。
-2. **`web-auth`**：绑定非回环接口时强制登录——登录/注册页（`/login`）+ 签名会话 cookie + 全部 `/api` 路由保护（`/api/auth/*` 除外）。回环绑定（127.0.0.1 等）时隐式信任，不强制登录。
+2. **`web-auth`**：强制远程访问者登录——登录/注册页（`/login`）+ 签名会话 cookie + 全部 `/api` 路由保护（`/api/auth/*` 除外）。免认证的只有**真正的回环请求**（见「信任判定」），与启动参数无关。
 3. **`auth-reset` 子命令**：`dsh --profile web auth-reset [--password <pwd>]`，重设管理员密码并**轮换签名密钥**（所有已发会话 cookie 立即失效）——忘记密码的恢复路径。
 4. **设置面板「认证」标签页**：前端插件通过 `ctx.slots.inject('settings.section', …)` 注册，提供退出登录（调 `/api/auth/logout`）与修改密码（调 `/api/auth/change-password`，服务端校验旧密码后轮换密钥并重签当前会话）。
 
@@ -128,11 +128,18 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 
 **会话认证**：密码用 scrypt（随机盐，64 字节）散列存 `~/.dsh/web-auth.json`（含 `username` / `passwordHash` / `secret`）；会话 cookie `dsh_sid` = `base64url(JSON{u,e}).HMAC-SHA256(secret)`，14 天有效、`HttpOnly` + `SameSite=Lax`。`secret` 随机 32 字节，`auth-reset` 时轮换。
 
+**信任判定：按请求，不按绑定地址（重要）**。免认证（隐式信任）要求**两个条件同时成立**：TCP 对端地址（`req.socket.remoteAddress`，含 `::ffff:127.0.0.1` / `::1`）是回环 **且** `Host` 头 authority 是回环（`isTrustedOrigin`）。否则必须带有效会话 cookie。
+- **为什么不能只看绑定地址**：`--host 127.0.0.1` + nginx 反代时，绑定地址是回环但访问者是远程的——只按绑定地址判定会让反代后的所有人免认证（issue #6 的第二种场景）。
+- **为什么两个条件都要**：只看 `Host` 头 → LAN 攻击者伪造 `Host: 127.0.0.1` 即可绕过认证；只看对端地址 → 同机反代（从 127.0.0.1 连入）会被误判为本机用户。两者都满足的访问者本来就能连回环，免认证安全。
+- **`X-Forwarded-For` 不采信**（客户端可伪造）。反代要让其客户端按远程处理，只需转发真实 `Host`（nginx 默认即 `proxy_set_header Host $host;`）；若把 `Host` 写死成回环，本插件就认为请求来自本机并放行——README 的安全说明里明确写了这条配置禁忌。
+- **前端跳转必须与判定一致**：`tapIndex` 注入的首页脚本只在 `!authenticated` 时跳 `/login`。曾经额外要求 `registered`（`!registered || !authenticated`），导致回环模式下未注册时 `authenticated=true` 而首页仍跳 login、login 页又跳回首页的死循环（issue #6）。`authenticated` 语义已含回环信任，前端不要再叠加 `registered` 条件。
+
 **路由保护顺序（重要）**：`web-auth` 在 `apply` 里同步包装 `webServer.register` 与 `webServer.registerUpgrade`，所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活。改动 patch 时保持这个注入，否则 API 不设防。
 
 **覆盖范围（所有路由，含事后追溯）**：包装**不只限 `/api` 前缀**——所有经 `webServer.register`/`registerUpgrade` 注册的路由（含第三方插件的非 `/api` channel，如 `/dsh-automation`、技能管理器）都做「认证 + Host/Origin 回环改写」；只有 `/login` 与 `/api/auth/*` 保持匿名。**关键坑**：cordis 的激活顺序**不是 bundle/树顺序**（动态 import 完成顺序不定，实测无论 bundle 怎么排，第三方插件都可能先于 web-auth 激活），所以包装必须在 apply 时**遍历 webserver 路由表（`exact`/`prefixes`/`upgrades` Map）把已注册的路由事后包装**（WeakSet 防重复），再包装未来的注册。只包装 `register` 而不做事后追溯时：先激活插件的路由（技能管理器 `/api/dsh-skills-manager` → `forbidden host`）、非 `/api` channel（`/dsh-automation/snapshot` → 403 `forbidden`）、以及 WebSocket 升级（`/api/events.*` → 403，事件流连不上）都会对远程用户报错。
 
 **特权 API 回环放行**：harness 的 `packages/client/connection/src/index.ts` 把 `settings.*`、`credentials.*`、`agentPreset.*`、`llm.discoverModels` 等 `PRIVILEGED_METHODS` 限制为**仅回环可访问**（注释原文：`until a real authentication layer exists`）；`rpc-host.ts` 的 `authority: "loopback"` channel（第三方 RPC）同样只认回环 Host。远程访问时这些接口返回 403。`web-auth` 的解法：认证通过后把请求 `Host`/`Origin` 头临时改写为 `127.0.0.1:<port>` 再转发给下游 handler（处理完还原）。**有效会话即认证层，等价于回环信任。**
+**改写条件的踩坑**：早先只在 `bindHost === '0.0.0.0'` 且 Host 非回环时改写，反代部署（绑定 127.0.0.1、`Host` 是公网域名）认证通过后不改写 → 特权 API 仍 403、设置面板打不开。现在条件只看**请求的 authority**（`!isLoopbackAuthority(req.headers.host)`），与绑定地址无关——真实的回环请求本来也不需要改写。
 
 **浏览器端 scope gate（rc.8 由前端插件化解，必须早于任何 scope bind）**：DSH 前端 `connection.isLoopback` 由**浏览器地址栏 hostname** 判定（`packages/client/connection/src/client/index.ts:106`），远程浏览器（域名/IP）恒为 false → `SettingsDescribeMirror` 用 memory 模式（`@deepseek-ai/dsh-client-ui-settings/lib/client.js:1340`，`ui-settings/settings-scope.ts:204`）且每个 `SettingsScopeController` 在 `bind()` 时按 `connection.isLoopback` 冻结 persistence（`settings-scope.ts:251`）——host 模式订阅 mirror 并 derive，memory 模式**不订阅不 derive**（`settings-scope.ts:990`）→ `status` 永远 `unavailable` → `PluginCard` 在 `!available` 时返回 null（`ui-settings-plugins/lib/client.js:206`），**整个卡片（header+body）都不渲染**。Models 页也走 `ctx.settingsScope.describe()`（共享 mirror），mirror memory 时 `load()`/`ensure()` 都短路 → Models 页抛 "settings are unavailable in this browser"。
 
@@ -190,7 +197,8 @@ npm test           # vitest run tests
 npm run build      # tsc，产物到 lib/；tsdown 打包前端 bundle 到 lib/client.js
 ```
 
-- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——回环放行、0.0.0.0 无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝；以及认证端点（register/login/change-password：限速、密钥轮换、重签会话、旧密码校验）。
+- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`/api/auth/status` 的四种判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名）；以及认证端点（register/login/change-password：限速、密钥轮换、重签会话、旧密码校验）。
+- fake 请求**必须同时给 `socket.remoteAddress` 和 `headers.host`**——信任判定两个都读，缺一个就按远程处理（`requestWithCookie` / `httpRequest` / `jsonRequest` 默认给回环值）。
 - `tests/startup.spec.ts`：验证 `--host 0.0.0.0` 被接受、`webStartup` 服务值、`auth-reset` 子命令（改密、密钥轮换、退出码）。
 - 每个测试 `beforeEach` 用 `mkdtempSync` + `DSH_WEB_AUTH_FILE` 隔离凭据文件，`afterEach` 清理。
 - **注意**：`npm pack` / `npm publish` 会触发 `prepack`（typecheck + test + build 全跑），测试不过无法发布。
