@@ -2,7 +2,7 @@
 
 [中文](README.md) | **English**
 
-A DSH (DeepSeek Harness) plugin that enables **remote web startup with username/password authentication**.
+A [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness) plugin that enables **remote web startup with username/password authentication**.
 
 ![Login page](docs/login-page.png)
 

@@ -253,6 +253,7 @@ dsh web
 
 ## 约定（本项目内）
 
+- **上游 dsh 出 0.1.2+ 正式版时，先读 `docs/upgrade-dsh-0.1.2-playbook.md`**（升级适配手册 + 退役路线：哪些代码必删/必加、验收清单、观察哨）。
 - 文件：`src/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见「依赖更新（Renovate 机器人）」）、`README.md`（用户文档）。
 - **改源码后必须 `npm run build`**（tsc + tsdown），否则 profile 里跑的还是旧产物；发布前必须保证 `npm pack` 全链路（prepack）通过。
 - 不要为了「省事」改掉 `cordis.patch.yml` 里的 `connection.inject: [webAuth]`——它保证 auth 在 API 路由注册前生效，是安全边界的一部分。
