@@ -220,6 +220,19 @@ dsh web
 
 忘记密码：`dsh --profile web auth-reset`（推荐，轮换密钥使旧会话失效）；或删除 `~/.dsh/web-auth.json` 重启后重新注册。
 
+### 依赖更新（Renovate 机器人）
+
+仓库挂了 **Mend 托管的 Renovate bot**（Community 免费计划，门户 `developer.mend.io/github/GDWhisper/dsh-web-startup-auth`），负责自动提依赖更新 PR。要点：
+
+- **配置**：仓库根 `renovate.json`（`config:recommended` + `dependencyDashboard: true`）。两条定制规则：
+  - `@deepseek-ai/dsh-*`（除 `cordis`/`schemastery`）**跟随 `next` dist-tag** 并 bump range——这些包的 `latest` 是占位版本，真正的发布在 `next` 上（见 renovate.json 内注释）。
+  - **`react` / `@types/react` 禁用更新**（锁 18）：前端插件的 react 是 external，运行时用宿主 SPA 提供的 React 18（harness 锁 `^18.2.0`），本地升 19 会对不上运行时。改动这条前想清楚。
+- **触发方式**：任务是**推送/手动触发**（Reason: `requested`），没有定时调度——推送到 main 才会跑。排查"机器人没动静"时别傻等。
+- **Dependency Dashboard 是 issue #9**：bot 自动维护，汇总待合并/被限流（每小时最多开 2 个 PR）的更新；**不要关闭它**（关了会被重建）。被限流的更新会在后续运行自动补开，也可在 issue 里勾选复选框强制。
+- **踩过的大坑：mend.io 的 Silent mode**。开启后任务照跑（jobs 全 DONE）但**零产出**——不开 PR、不建 Dashboard。表现为"任务成功却毫无动静"。在门户仓库 Settings 里关闭，再手动触发一轮即恢复。排查顺序：门户 Recent jobs → Silent 开关 → job 日志。
+- **处理它的 PR**：分支 `renovate/*`、作者 `app/renovate`。本仓库**没有 PR 触发的 CI**（`publish.yml` 只在发布时跑），合并前必须本地验证：`npm install && npm run typecheck && npm test && npm run build`。major 更新（如 vitest 3→4、node 22→24、typescript 5→7）尤其要跑全链路；typescript 升级以**对齐 harness 的版本**为基准（当前 ^6.0.3），不盲目跟最新大版本。
+- **注意**：`package-lock.json` 的 registry 指向 npmmirror 的问题尚未处理（用户决定暂缓）；若 Dashboard 出现大量 "Failed to look up" 条目，先怀疑它。
+
 ### 本机环境备注
 
 - **harness 源码**（dsh 本体）：`/home/pax/coding/research/deepseek-harness`。相关位置：
@@ -240,7 +253,7 @@ dsh web
 
 ## 约定（本项目内）
 
-- 文件：`src/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`README.md`（用户文档）。
+- 文件：`src/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见「依赖更新（Renovate 机器人）」）、`README.md`（用户文档）。
 - **改源码后必须 `npm run build`**（tsc + tsdown），否则 profile 里跑的还是旧产物；发布前必须保证 `npm pack` 全链路（prepack）通过。
 - 不要为了「省事」改掉 `cordis.patch.yml` 里的 `connection.inject: [webAuth]`——它保证 auth 在 API 路由注册前生效，是安全边界的一部分。
 - 同样不要删 `cordis.patch.yml` 里的**包根行**（`- id: dsh-web-startup-auth / name: dsh-web-startup-auth`）——它是前端插件进 `__DSH_BOOT__` 的前提，删掉后设置面板「认证」标签页消失。
