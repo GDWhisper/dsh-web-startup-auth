@@ -19,6 +19,11 @@
       "description": "react is external in lib/client.js: at runtime the DSH host SPA provides React 18 (harness pins react ^18.2.0 / @types/react ~18.3.1). Upgrading locally would build against React 19 types while running on the host's React 18.",
       "matchPackageNames": ["react", "@types/react"],
       "enabled": false
+    },
+    {
+      "description": "Hold TypeScript on the 6.x line to match the harness baseline (^6.0.3) instead of chasing latest. 7.0 is the native (Go) port: its bin drops tsserver and its package.json exposes no main/types, so the programmatic TypeScript API is gone — editors set to 'use workspace version' lose their language server, and rolldown-plugin-dts (pulled in by tsdown) needs that API as soon as dts is enabled. Still offers 6.x patch/minor.",
+      "matchPackageNames": ["typescript"],
+      "allowedVersions": "6.x"
     }
   ]
 }
