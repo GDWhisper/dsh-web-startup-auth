@@ -25,7 +25,8 @@ import type { ReactElement } from 'react';
 export declare const inject: string[];
 /**
  * The settings tab content. Sign-out navigates back to the login page;
- * change-password posts to the auth endpoint and shows the outcome inline.
+ * change-username / change-password post to the auth endpoints and show the
+ * outcome inline.
  */
 export declare function AuthSection(props: PropsRuntime<'settings.section'>): ReactElement;
 /**

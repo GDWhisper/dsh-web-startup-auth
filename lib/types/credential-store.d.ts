@@ -7,6 +7,17 @@
  */
 /** Minimum password length for registration and the CLI password reset. */
 export declare const MIN_PASSWORD_LENGTH = 8;
+/**
+ * Normalize a username: strip C0 control characters (0x00-0x1F) and DEL
+ * (0x7F), then trim surrounding whitespace.
+ *
+ * `String.prototype.trim()` alone only removes whitespace — keyboards/IMEs
+ * can emit DEL and pasted text can carry invisible control characters, which
+ * would otherwise be stored verbatim (issue #14).
+ * @param raw - the raw username input.
+ * @returns the sanitized username (possibly empty).
+ */
+export declare function normalizeUsername(raw: string): string;
 declare function credentialFile(): string;
 /** In-memory snapshot of the credential file (re-read on every auth). */
 interface CredentialFile {
@@ -64,6 +75,19 @@ export declare function registerCredentials(username: string, password: string):
  */
 export declare function validateCredentials(username: string, password: string): boolean;
 /**
+ * Update stored credentials in a single write.
+ *
+ * Always rotates the session signing secret, which invalidates every already
+ * issued session cookie — callers must re-issue a fresh session for the
+ * authenticated user.
+ * @param opts - the fields to replace; omitted fields keep their values.
+ * @throws when no credentials exist yet.
+ */
+export declare function updateCredentials(opts: {
+    username?: string;
+    password?: string;
+}): void;
+/**
  * Replace the stored password (keeps the username).
  *
  * Also rotates the session signing secret, which invalidates every already
@@ -84,6 +108,17 @@ export declare function resetPassword(newPassword: string): void;
  * @returns `true` when the old password matched and the change was applied.
  */
 export declare function changePassword(oldPassword: string, newPassword: string): boolean;
+/**
+ * Change the stored username after verifying the current password.
+ *
+ * Mirrors {@link changePassword}: rotates the session signing secret, which
+ * invalidates every already-issued session cookie — the caller must re-issue
+ * a fresh session for the authenticated user.
+ * @param newUsername - the replacement username (already normalized).
+ * @param currentPassword - the current password (verified against the store).
+ * @returns `true` when the password matched and the change was applied.
+ */
+export declare function changeUsername(newUsername: string, currentPassword: string): boolean;
 /**
  * Get the configured username, if credentials are set.
  * @returns the username, or `undefined` when not registered.

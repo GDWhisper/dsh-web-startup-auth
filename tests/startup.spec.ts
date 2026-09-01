@@ -14,6 +14,8 @@ import {
   validateCredentials,
   signSession,
   verifySession,
+  getSessionSecret,
+  getUsername,
 } from '../src/credential-store.ts'
 
 let authFile: string
@@ -153,6 +155,41 @@ describe('runAuthReset', () => {
     registerCredentials('admin', 'supersecret1')
     await expect(runAuthReset({ password: 'short' })).rejects.toThrow('密码至少')
   })
+
+  it('replaces only the username when --username is given without --password', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const oldCookie = sessionCookie('admin')
+    const oldPayload = oldCookie.slice(0, oldCookie.indexOf('.'))
+    const oldSig = oldCookie.slice(oldCookie.indexOf('.') + 1)
+
+    await runAuthReset({ username: 'alice' })
+
+    expect(getUsername()).toBe('alice')
+    // The password is untouched
+    expect(validateCredentials('alice', 'supersecret1')).toBe(true)
+    // The secret rotated, so previously issued cookies are invalid
+    expect(verifySession(oldPayload, oldSig)).toBe(false)
+  })
+
+  it('replaces both username and password together', async () => {
+    registerCredentials('admin', 'supersecret1')
+    await runAuthReset({ username: 'alice', password: 'supersecret2' })
+    expect(getUsername()).toBe('alice')
+    expect(validateCredentials('alice', 'supersecret2')).toBe(true)
+    expect(validateCredentials('alice', 'supersecret1')).toBe(false)
+  })
+
+  it('normalizes control characters out of --username', async () => {
+    registerCredentials('admin', 'supersecret1')
+    await runAuthReset({ username: 'draguide\u007F' })
+    expect(getUsername()).toBe('draguide')
+  })
+
+  it('rejects a username that strips to empty', async () => {
+    registerCredentials('admin', 'supersecret1')
+    await expect(runAuthReset({ username: '\u0001\u007F' })).rejects.toThrow('用户名不能为空')
+    expect(getUsername()).toBe('admin')
+  })
 })
 
 describe('dsh --profile web auth-reset (commander integration)', () => {
@@ -167,5 +204,13 @@ describe('dsh --profile web auth-reset (commander integration)', () => {
   it('exits 1 with an error message on failure', async () => {
     const ctx = await runAuthResetCli(['auth-reset', '--password', 'supersecret2'])
     expect(ctx.exitCodes).toEqual([1])
+  })
+
+  it('changes the username and exits 0', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const ctx = await runAuthResetCli(['auth-reset', '--username', 'alice'])
+    expect(ctx.exitCodes).toEqual([0])
+    expect(getUsername()).toBe('alice')
+    expect(validateCredentials('alice', 'supersecret1')).toBe(true)
   })
 })

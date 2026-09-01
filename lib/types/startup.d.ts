@@ -10,8 +10,9 @@
  * before.
  *
  * It also owns the `auth-reset` subcommand (`dsh --profile web auth-reset`):
- * resetting the web-auth administrator password, which rotates the session
- * signing secret and invalidates every existing session cookie.
+ * resetting the web-auth administrator password and/or username, which
+ * rotates the session signing secret and invalidates every existing session
+ * cookie.
  */
 import type { Context } from '@deepseek-ai/cordis';
 declare module '@deepseek-ai/cordis' {
@@ -40,14 +41,22 @@ export interface WebStartupValues {
 /** Options for the `auth-reset` subcommand. */
 export interface AuthResetOptions {
     password?: string;
+    /** Replacement administrator username; omitted keeps the current one. */
+    username?: string;
 }
 /**
- * Reset the web-auth administrator password.
+ * Reset the web-auth administrator password and/or username.
  *
- * Rotates the session signing secret, so every previously issued session
- * cookie becomes invalid at once. This is the documented recovery path for a
- * forgotten password (deleting the credential file is the fallback).
- * @param options - `--password` value, or nothing for the interactive prompt.
+ * Always rotates the session signing secret, so every previously issued
+ * session cookie becomes invalid at once. This is the documented recovery
+ * path for a forgotten password (deleting the credential file is the
+ * fallback) and for a username containing stray control characters (issue
+ * #14).
+ *
+ * Password handling: `--password` supplies it directly; without `--username`
+ * the interactive prompt asks for one (the historical behavior). With
+ * `--username` but no `--password`, the password is left untouched.
+ * @param options - `--password` / `--username` values.
  * @returns a human-readable success message.
  */
 export declare function runAuthReset(options: AuthResetOptions): Promise<string>;

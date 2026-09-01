@@ -10,7 +10,7 @@
 - 由**三个插件入口**组成（`package.json` 的 `exports` 子路径分别暴露）：
   - `dsh-web-startup-auth/startup` → 插件 id `remote-web-startup`（`src/startup.ts`）：与原版 `@deepseek-ai/dsh-web-app/startup` 唯一区别是**不拒绝 `--host 0.0.0.0`**，提供同名 `webStartup` 服务。
   - `dsh-web-startup-auth/auth` → 插件 id `web-auth`（`src/auth.ts`）：登录/注册页、会话 cookie、`/api` 路由保护、`webAuth` 服务。
-  - `dsh-web-startup-auth/client` → **前端插件**（`src/client/index.tsx`，打包产物 `lib/client.js`）：向 DSH 设置面板的 `settings.section` slot 注册「认证」标签页（退出登录 + 修改密码）。
+  - `dsh-web-startup-auth/client` → **前端插件**（`src/client/index.tsx`，打包产物 `lib/client.js`）：向 DSH 设置面板的 `settings.section` slot 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码）。
 - 插件 id：`remote-web-startup` / `web-auth`；npm 包名：`dsh-web-startup-auth`；目录：`/home/pax/coding/dsh-web-startup-auth`。
 - 构建流水线：`src/*.ts` → `tsc` → `lib/*.js`，前端插件额外 `tsdown` → `lib/client.js`（**必须 `npm run build` 后插件才能加载**，`exports` 指向 `lib/`）。
 - 测试：`npm test`（vitest），凭据文件用临时目录隔离（见「如何测试」）。
@@ -121,12 +121,13 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 
 1. **`remote-web-startup`**：行为与原版一致，只是**删掉 0.0.0.0 拒绝**。安全责任转移到 auth 插件。
 2. **`web-auth`**：强制远程访问者登录——登录/注册页（`/login`）+ 签名会话 cookie + 全部 `/api` 路由保护（`/api/auth/*` 除外）。免认证的只有**真正的回环请求**（见「信任判定」），与启动参数无关。
-3. **`auth-reset` 子命令**：`dsh --profile web auth-reset [--password <pwd>]`，重设管理员密码并**轮换签名密钥**（所有已发会话 cookie 立即失效）——忘记密码的恢复路径。
-4. **设置面板「认证」标签页**：前端插件通过 `ctx.slots.inject('settings.section', …)` 注册，提供退出登录（调 `/api/auth/logout`）与修改密码（调 `/api/auth/change-password`，服务端校验旧密码后轮换密钥并重签当前会话）。
+3. **`auth-reset` 子命令**：`dsh --profile web auth-reset [--password <pwd>] [--username <name>]`，重设管理员密码和/或修改用户名并**轮换签名密钥**（所有已发会话 cookie 立即失效）——忘记密码、忘记用户名、修复含控制字符用户名的恢复路径。只给 `--username` 时密码保持不变；都不给时交互式输入新密码（历史行为）。
+4. **设置面板「认证」标签页**：前端插件通过 `ctx.slots.inject('settings.section', …)` 注册，提供退出登录（调 `/api/auth/logout`）、修改用户名与修改密码（分别调 `/api/auth/change-username` / `/api/auth/change-password`，服务端校验当前密码后轮换密钥并重签当前会话）。
 
 ### 关键机制（踩过的坑）
 
 **会话认证**：密码用 scrypt（随机盐，64 字节）散列存 `~/.dsh/web-auth.json`（含 `username` / `passwordHash` / `secret`）；会话 cookie `dsh_sid` = `base64url(JSON{u,e}).HMAC-SHA256(secret)`，14 天有效、`HttpOnly` + `SameSite=Lax`。`secret` 随机 32 字节，`auth-reset` 时轮换。
+**用户名净化（issue #14）**：`credential-store.ts` 的 `normalizeUsername` 剥除 C0 控制字符（0x00–0x1F）与 DEL（0x7F）再 trim（`trim()` 只剥空白，控制字符会原样入盘），register/login/change-username 入口统一走它，剥空则 400。**`verifySession` 只验 HMAC+时效、不比对 payload 的 `u` 与存储 username**——因此改用户名（同改密码）必须轮换 `secret` 才能作废旧会话；`updateCredentials({ username?, password? })` 是统一的单次写+单次轮换入口，`resetPassword`/`changeUsername` 都是其薄封装。
 
 **信任判定：按请求，不按绑定地址（重要）**。免认证（隐式信任）要求**两个条件同时成立**：TCP 对端地址（`req.socket.remoteAddress`，含 `::ffff:127.0.0.1` / `::1`）是回环 **且** `Host` 头 authority 是回环（`isTrustedOrigin`）。否则必须带有效会话 cookie。
 - **为什么不能只看绑定地址**：`--host 127.0.0.1` + nginx 反代时，绑定地址是回环但访问者是远程的——只按绑定地址判定会让反代后的所有人免认证（issue #6 的第二种场景）。
@@ -170,10 +171,10 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 | 文件 | 职责 |
 |---|---|
 | `src/startup.ts` | `remote-web-startup` 插件：commander 解析 `--host/--port/--trusted-host`，`provide('webStartup', values)`；`auth-reset` 子命令（`runAuthReset`）；`WEB_STARTUP_SERVICE` 常量 |
-| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password）、包装 `webServer.register` 做路由保护、`tapIndex` 注入 randomUUID polyfill + 登录重定向、Host/Origin 回环改写、`provide('webAuth')` |
-| `src/credential-store.ts` | 凭据持久化：scrypt 散列、`registerCredentials` / `validateCredentials` / `resetPassword` / `changePassword` / `getUsername` / `signSession` / `verifySession` / `hasCredentials`；`DSH_WEB_AUTH_FILE` 覆盖 |
+| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password/change-username）、包装 `webServer.register` 做路由保护、`tapIndex` 注入 randomUUID polyfill + 登录重定向、Host/Origin 回环改写、`provide('webAuth')` |
+| `src/credential-store.ts` | 凭据持久化：scrypt 散列、`normalizeUsername`（剥 C0+DEL）/ `registerCredentials` / `validateCredentials` / `updateCredentials`（单次写+轮换）/ `resetPassword` / `changePassword` / `changeUsername` / `getUsername` / `signSession` / `verifySession` / `hasCredentials`；`DSH_WEB_AUTH_FILE` 覆盖 |
 | `src/login-page.ts` | 自包含登录/注册页 HTML（黑白蓝风格 + brand wordmark SVG） |
-| `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改密码 UI），打包为 `lib/client.js` |
+| `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码 UI），打包为 `lib/client.js` |
 | `tsdown.config.ts` | 前端插件打包配置（`window.__ModuleLoader__.load` 格式、external 列表） |
 | `src/index.ts` | 仅类型导出（`WebStartupValues`、`AuthConfig`、`WebAuthService`） |
 | `cordis.patch.yml` | bundle patch：禁用 `web-startup`、insert 三个插件（含包根行 `dsh-web-startup-auth`，客户端扫描必需）、`connection` 注入 `webAuth` |
@@ -197,9 +198,9 @@ npm test           # vitest run tests
 npm run build      # tsc，产物到 lib/；tsdown 打包前端 bundle 到 lib/client.js
 ```
 
-- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`/api/auth/status` 的四种判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名）；以及认证端点（register/login/change-password：限速、密钥轮换、重签会话、旧密码校验）。
+- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`/api/auth/status` 的四种判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名）；以及认证端点（register/login/change-password/change-username：用户名净化、限速、密钥轮换、重签会话、旧/当前密码校验、同名 no-op 不轮换）。
 - fake 请求**必须同时给 `socket.remoteAddress` 和 `headers.host`**——信任判定两个都读，缺一个就按远程处理（`requestWithCookie` / `httpRequest` / `jsonRequest` 默认给回环值）。
-- `tests/startup.spec.ts`：验证 `--host 0.0.0.0` 被接受、`webStartup` 服务值、`auth-reset` 子命令（改密、密钥轮换、退出码）。
+- `tests/startup.spec.ts`：验证 `--host 0.0.0.0` 被接受、`webStartup` 服务值、`auth-reset` 子命令（改密/改用户名、密钥轮换、退出码）。
 - 每个测试 `beforeEach` 用 `mkdtempSync` + `DSH_WEB_AUTH_FILE` 隔离凭据文件，`afterEach` 清理。
 - **注意**：`npm pack` / `npm publish` 会触发 `prepack`（typecheck + test + build 全跑），测试不过无法发布。
 

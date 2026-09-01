@@ -13,8 +13,10 @@ import {
   signSession,
   hardenCredentialFilePermissions,
   changePassword,
+  changeUsername,
   getSessionSecret,
   getUsername,
+  normalizeUsername,
   validateCredentials,
 } from '../src/credential-store.ts'
 
@@ -156,6 +158,25 @@ async function callEndpoint(routes: WebRoute[], path: string, body: unknown, ip:
   await findRoute(routes, path).handler(jsonRequest('POST', body, { ip }), res)
   return captured
 }
+
+// ── username normalization (issue #14) ───────────────────────────────────────
+
+describe('normalizeUsername', () => {
+  it('strips C0 control characters and DEL', () => {
+    expect(normalizeUsername('draguide\u007F')).toBe('draguide')
+    expect(normalizeUsername('\u0001admin\u0002')).toBe('admin')
+    expect(normalizeUsername('a\u0000b\rc')).toBe('abc')
+  })
+
+  it('trims surrounding whitespace', () => {
+    expect(normalizeUsername('  admin\t')).toBe('admin')
+  })
+
+  it('keeps internal spaces and non-ASCII characters', () => {
+    expect(normalizeUsername('管 理 员')).toBe('管 理 员')
+    expect(normalizeUsername('a b c')).toBe('a b c')
+  })
+})
 
 // ── service-level tests (session semantics) ──────────────────────────────────
 
@@ -424,6 +445,19 @@ describe('POST /api/auth/register', () => {
     const res = await callEndpoint(routes, '/api/auth/register', { username: 'admin', password: 'x'.repeat(2 * 1024 * 1024) }, '192.0.2.10')
     expect(res.statusCode).toBe(413)
   })
+
+  it('strips control characters from the username before storing (issue #14)', async () => {
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/register', { username: 'draguide\u007F', password: 'supersecret1' }, '192.0.2.10')
+    expect(res.statusCode).toBe(200)
+    expect(getUsername()).toBe('draguide')
+  })
+
+  it('rejects a username that strips to empty', async () => {
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/register', { username: '\u0001\u007F', password: 'supersecret1' }, '192.0.2.10')
+    expect(res.statusCode).toBe(400)
+  })
 })
 
 // ── login endpoint: rate limiting and body cap ───────────────────────────────
@@ -476,6 +510,13 @@ describe('POST /api/auth/login', () => {
     const { routes } = fakeWebAuthContext('0.0.0.0')
     const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'x'.repeat(2 * 1024 * 1024) }, '192.0.2.20')
     expect(res.statusCode).toBe(413)
+  })
+
+  it('normalizes a username carrying control characters', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ok = await callEndpoint(routes, '/api/auth/login', { username: '\u0001admin\u007F', password: 'supersecret1' }, '192.0.2.24')
+    expect(ok.statusCode).toBe(200)
   })
 })
 
@@ -553,6 +594,128 @@ describe('POST /api/auth/change-password', () => {
   })
 })
 
+// ── change-username endpoint ─────────────────────────────────────────────────
+
+describe('POST /api/auth/change-username', () => {
+  /** POST to change-username as the given caller. */
+  async function callChangeUsername(
+    routes: WebRoute[],
+    body: unknown,
+    opts: { ip: string; cookie?: string; loopback?: boolean },
+  ): Promise<CapturedResponse> {
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/change-username').handler(
+      jsonRequest('POST', body, {
+        ip: opts.ip,
+        host: opts.loopback === true ? '127.0.0.1:3080' : 'dsh.example.com',
+        ...(opts.cookie !== undefined ? { cookie: opts.cookie } : {}),
+      }),
+      res,
+    )
+    return captured
+  }
+
+  it('rejects an unauthenticated remote caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = await callChangeUsername(routes, { newUsername: 'alice', currentPassword: 'supersecret1' }, { ip: '192.0.2.50' })
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('rejects a wrong current password for an authenticated caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = await callChangeUsername(
+      routes,
+      { newUsername: 'alice', currentPassword: 'wrong-password' },
+      { ip: '192.0.2.51', cookie: sessionCookie('admin') },
+    )
+    expect(captured.statusCode).toBe(401)
+    expect(getUsername()).toBe('admin')
+  })
+
+  it('locks out a client after repeated wrong-password attempts', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ip = '192.0.2.52'
+    for (let i = 0; i < 5; i += 1) {
+      const captured = await callChangeUsername(
+        routes,
+        { newUsername: 'alice', currentPassword: 'wrong-password' },
+        { ip, cookie: sessionCookie('admin') },
+      )
+      expect(captured.statusCode).toBe(401)
+    }
+    const captured = await callChangeUsername(
+      routes,
+      { newUsername: 'alice', currentPassword: 'supersecret1' },
+      { ip, cookie: sessionCookie('admin') },
+    )
+    expect(captured.statusCode).toBe(429)
+  })
+
+  it('rejects a username that strips to empty', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = await callChangeUsername(
+      routes,
+      { newUsername: '\u007F', currentPassword: 'supersecret1' },
+      { ip: '192.0.2.53', cookie: sessionCookie('admin') },
+    )
+    expect(captured.statusCode).toBe(400)
+  })
+
+  it('treats an unchanged username as a no-op without rotating the secret', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const before = getSessionSecret()
+    const captured = await callChangeUsername(
+      routes,
+      { newUsername: '\u0001admin\u007F', currentPassword: 'supersecret1' },
+      { ip: '192.0.2.54', cookie: sessionCookie('admin') },
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(JSON.parse(captured.body)).toEqual({ ok: true, username: 'admin' })
+    expect(getSessionSecret()).toBe(before)
+  })
+
+  it('rotates the secret, re-issues a session, and stores the new username', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const oldCookie = sessionCookie('admin')
+    const captured = await callChangeUsername(
+      routes,
+      { newUsername: 'alice', currentPassword: 'supersecret1' },
+      { ip: '192.0.2.55', cookie: oldCookie },
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(JSON.parse(captured.body)).toEqual({ ok: true, username: 'alice' })
+    // Old cookie is invalidated by the secret rotation
+    const { auth } = fakeWebAuthContext('0.0.0.0')
+    expect(auth.authenticate(requestWithCookie(oldCookie, remote))).toBe(false)
+    // The re-issued cookie from the response authenticates the new secret
+    const freshCookie = captured.setCookie?.split(';')[0]
+    expect(freshCookie).toMatch(/^dsh_sid=/)
+    expect(auth.authenticate(requestWithCookie(freshCookie, remote))).toBe(true)
+    // The username changed; the password is untouched
+    expect(getUsername()).toBe('alice')
+    expect(validateCredentials('alice', 'supersecret1')).toBe(true)
+    expect(validateCredentials('admin', 'supersecret1')).toBe(false)
+  })
+
+  it('allows a loopback caller without a session cookie', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('127.0.0.1')
+    const captured = await callChangeUsername(
+      routes,
+      { newUsername: 'alice', currentPassword: 'supersecret1' },
+      { ip: '127.0.0.1', loopback: true },
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(getUsername()).toBe('alice')
+  })
+})
+
 // ── credential-store changePassword ──────────────────────────────────────────
 
 describe('credential-store changePassword', () => {
@@ -574,5 +737,29 @@ describe('credential-store changePassword', () => {
     expect(validateCredentials('admin', 'supersecret1')).toBe(false)
     expect(getSessionSecret()).not.toBe(before)
     expect(getUsername()).toBe('admin')
+  })
+})
+
+// ── credential-store changeUsername ──────────────────────────────────────────
+
+describe('credential-store changeUsername', () => {
+  it('returns false when credentials are not set', () => {
+    expect(changeUsername('alice', 'whatever')).toBe(false)
+  })
+
+  it('returns false when the current password does not match', () => {
+    registerCredentials('admin', 'supersecret1')
+    expect(changeUsername('alice', 'wrong-password')).toBe(false)
+    expect(getUsername()).toBe('admin')
+  })
+
+  it('replaces the username and rotates the secret on success', () => {
+    registerCredentials('admin', 'supersecret1')
+    const before = getSessionSecret()
+    expect(changeUsername('alice', 'supersecret1')).toBe(true)
+    expect(getUsername()).toBe('alice')
+    expect(validateCredentials('alice', 'supersecret1')).toBe(true)
+    expect(validateCredentials('admin', 'supersecret1')).toBe(false)
+    expect(getSessionSecret()).not.toBe(before)
   })
 })

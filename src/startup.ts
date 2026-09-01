@@ -10,8 +10,9 @@
  * before.
  *
  * It also owns the `auth-reset` subcommand (`dsh --profile web auth-reset`):
- * resetting the web-auth administrator password, which rotates the session
- * signing secret and invalidates every existing session cookie.
+ * resetting the web-auth administrator password and/or username, which
+ * rotates the session signing secret and invalidates every existing session
+ * cookie.
  */
 
 import { Command } from 'commander'
@@ -19,7 +20,7 @@ import { execSync } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
-import { hasCredentials, resetPassword, MIN_PASSWORD_LENGTH } from './credential-store.ts'
+import { hasCredentials, updateCredentials, normalizeUsername, MIN_PASSWORD_LENGTH } from './credential-store.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -60,6 +61,8 @@ interface WebOptions {
 /** Options for the `auth-reset` subcommand. */
 export interface AuthResetOptions {
   password?: string
+  /** Replacement administrator username; omitted keeps the current one. */
+  username?: string
 }
 
 /** This app's command: its flags, its description, and its help text. */
@@ -78,6 +81,7 @@ Examples:
   dsh --profile web --no-open                serve without opening a browser
   dsh --profile web --host 0.0.0.0 --port 8080   serve on all interfaces (requires auth)
   dsh --profile web auth-reset               reset the web-auth password (invalidates all sessions)
+  dsh --profile web auth-reset --username alice   change the administrator username (invalidates all sessions)
 `)
 }
 
@@ -123,27 +127,43 @@ async function promptNewPassword(): Promise<string> {
 }
 
 /**
- * Reset the web-auth administrator password.
+ * Reset the web-auth administrator password and/or username.
  *
- * Rotates the session signing secret, so every previously issued session
- * cookie becomes invalid at once. This is the documented recovery path for a
- * forgotten password (deleting the credential file is the fallback).
- * @param options - `--password` value, or nothing for the interactive prompt.
+ * Always rotates the session signing secret, so every previously issued
+ * session cookie becomes invalid at once. This is the documented recovery
+ * path for a forgotten password (deleting the credential file is the
+ * fallback) and for a username containing stray control characters (issue
+ * #14).
+ *
+ * Password handling: `--password` supplies it directly; without `--username`
+ * the interactive prompt asks for one (the historical behavior). With
+ * `--username` but no `--password`, the password is left untouched.
+ * @param options - `--password` / `--username` values.
  * @returns a human-readable success message.
  */
 export async function runAuthReset(options: AuthResetOptions): Promise<string> {
   if (!hasCredentials()) {
     throw new Error('尚未注册管理员账号，无需重置')
   }
-  let password = options.password
-  if (password === undefined) {
+  const username = options.username !== undefined ? normalizeUsername(options.username) : undefined
+  if (options.username !== undefined && !username) {
+    throw new Error('用户名不能为空')
+  }
+  let password: string | undefined = options.password
+  if (password === undefined && username === undefined) {
     password = await promptNewPassword()
   }
-  if (password.length < MIN_PASSWORD_LENGTH) {
+  if (password !== undefined && password.length < MIN_PASSWORD_LENGTH) {
     throw new Error(`密码至少 ${MIN_PASSWORD_LENGTH} 个字符`)
   }
-  resetPassword(password)
-  return '管理员密码已重置，所有现有会话已失效'
+  updateCredentials({
+    ...username !== undefined && { username },
+    ...password !== undefined && { password },
+  })
+  const parts: string[] = []
+  if (username !== undefined) parts.push('管理员用户名已更新')
+  if (password !== undefined) parts.push('管理员密码已重置')
+  return `${parts.join('，')}，所有现有会话已失效`
 }
 
 /**
@@ -168,8 +188,9 @@ export function apply(ctx: Context): void {
 
   program
     .command('auth-reset')
-    .description('Reset the web-auth administrator password; invalidates all existing sessions.')
+    .description('Reset the web-auth administrator password and/or username; invalidates all existing sessions.')
     .option('--password <password>', 'new password (omit for a hidden interactive prompt)')
+    .option('--username <username>', 'new administrator username (omit to keep the current one)')
     .action(async (options: AuthResetOptions) => {
       const exit = ctx.get('appExit')
       try {

@@ -14,6 +14,21 @@ import { randomBytes, scryptSync, createHmac } from 'node:crypto'
 /** Minimum password length for registration and the CLI password reset. */
 export const MIN_PASSWORD_LENGTH = 8
 
+/**
+ * Normalize a username: strip C0 control characters (0x00-0x1F) and DEL
+ * (0x7F), then trim surrounding whitespace.
+ *
+ * `String.prototype.trim()` alone only removes whitespace — keyboards/IMEs
+ * can emit DEL and pasted text can carry invisible control characters, which
+ * would otherwise be stored verbatim (issue #14).
+ * @param raw - the raw username input.
+ * @returns the sanitized username (possibly empty).
+ */
+export function normalizeUsername(raw: string): string {
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001F\u007F]/g, '').trim()
+}
+
 /** The persisted credential file (overridable via DSH_WEB_AUTH_FILE for tests). */
 const CREDENTIAL_DIR = join(homedir(), '.dsh')
 function credentialFile(): string {
@@ -130,6 +145,27 @@ export function validateCredentials(username: string, password: string): boolean
 }
 
 /**
+ * Update stored credentials in a single write.
+ *
+ * Always rotates the session signing secret, which invalidates every already
+ * issued session cookie — callers must re-issue a fresh session for the
+ * authenticated user.
+ * @param opts - the fields to replace; omitted fields keep their values.
+ * @throws when no credentials exist yet.
+ */
+export function updateCredentials(opts: { username?: string; password?: string }): void {
+  const creds = readCredentials()
+  if (creds === undefined) {
+    throw new Error('web-auth: no credentials to update')
+  }
+  writeCredentials({
+    username: opts.username ?? creds.username,
+    passwordHash: opts.password !== undefined ? hashPassword(opts.password, makeSalt()) : creds.passwordHash,
+    secret: makeSecret(),
+  })
+}
+
+/**
  * Replace the stored password (keeps the username).
  *
  * Also rotates the session signing secret, which invalidates every already
@@ -139,17 +175,7 @@ export function validateCredentials(username: string, password: string): boolean
  * @throws when no credentials exist yet.
  */
 export function resetPassword(newPassword: string): void {
-  const creds = readCredentials()
-  if (creds === undefined) {
-    throw new Error('web-auth: no credentials to reset')
-  }
-  const salt = makeSalt()
-  const secret = makeSecret()
-  writeCredentials({
-    username: creds.username,
-    passwordHash: hashPassword(newPassword, salt),
-    secret,
-  })
+  updateCredentials({ password: newPassword })
 }
 
 /**
@@ -167,6 +193,24 @@ export function changePassword(oldPassword: string, newPassword: string): boolea
   if (creds === undefined) return false
   if (!validateCredentials(creds.username, oldPassword)) return false
   resetPassword(newPassword)
+  return true
+}
+
+/**
+ * Change the stored username after verifying the current password.
+ *
+ * Mirrors {@link changePassword}: rotates the session signing secret, which
+ * invalidates every already-issued session cookie — the caller must re-issue
+ * a fresh session for the authenticated user.
+ * @param newUsername - the replacement username (already normalized).
+ * @param currentPassword - the current password (verified against the store).
+ * @returns `true` when the password matched and the change was applied.
+ */
+export function changeUsername(newUsername: string, currentPassword: string): boolean {
+  const creds = readCredentials()
+  if (creds === undefined) return false
+  if (!validateCredentials(creds.username, currentPassword)) return false
+  updateCredentials({ username: newUsername })
   return true
 }
 

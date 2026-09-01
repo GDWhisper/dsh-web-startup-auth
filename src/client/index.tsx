@@ -36,7 +36,7 @@ const SECTION_ID = 'auth'
 const MESSAGE_MS = 5000
 
 /** The username shown in the tab (undefined until the status fetch resolves). */
-function useUsername(): string | undefined {
+function useUsername(): [string | undefined, (username: string) => void] {
   const [username, setUsername] = useState<string | undefined>(undefined)
   useEffect(() => {
     let cancelled = false
@@ -52,18 +52,21 @@ function useUsername(): string | undefined {
     })()
     return () => { cancelled = true }
   }, [])
-  return username
+  return [username, setUsername]
 }
 
-/** Transient message state (kind drives the message color). */
-type Notice = { kind: 'ok' | 'error'; text: string }
+/** Transient message state (kind drives the color; owner picks the row that shows it). */
+type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' }
 
 /**
  * The settings tab content. Sign-out navigates back to the login page;
- * change-password posts to the auth endpoint and shows the outcome inline.
+ * change-username / change-password post to the auth endpoints and show the
+ * outcome inline.
  */
 export function AuthSection(props: PropsRuntime<'settings.section'>): ReactElement {
-  const username = useUsername()
+  const [username, setUsername] = useUsername()
+  const [newUsername, setNewUsername] = useState('')
+  const [usernamePassword, setUsernamePassword] = useState('')
   const [oldPassword, setOldPassword] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [confirm, setConfirm] = useState('')
@@ -86,13 +89,13 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
     } catch {
       setBusy(false)
       setConfirmingSignOut(false)
-      flash({ kind: 'error', text: '退出失败，请重试' })
+      flash({ kind: 'error', text: '退出失败，请重试', owner: 'account' })
     }
   }, [flash])
 
   const changePassword = useCallback(async () => {
     if (newPassword !== confirm) {
-      flash({ kind: 'error', text: '两次输入的新密码不一致' })
+      flash({ kind: 'error', text: '两次输入的新密码不一致', owner: 'password' })
       return
     }
     setBusy(true)
@@ -107,16 +110,40 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
         setOldPassword('')
         setNewPassword('')
         setConfirm('')
-        flash({ kind: 'ok', text: '密码已修改' })
+        flash({ kind: 'ok', text: '密码已修改', owner: 'password' })
       } else {
-        flash({ kind: 'error', text: data.error ?? '修改失败，请重试' })
+        flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'password' })
       }
     } catch {
-      flash({ kind: 'error', text: '修改失败，请重试' })
+      flash({ kind: 'error', text: '修改失败，请重试', owner: 'password' })
     } finally {
       setBusy(false)
     }
   }, [oldPassword, newPassword, confirm, flash])
+
+  const changeUsername = useCallback(async () => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/auth/change-username', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ newUsername, currentPassword: usernamePassword }),
+      })
+      const data = (await res.json()) as { error?: string; username?: string }
+      if (res.ok) {
+        setNewUsername('')
+        setUsernamePassword('')
+        if (typeof data.username === 'string') setUsername(data.username)
+        flash({ kind: 'ok', text: '用户名已更新', owner: 'username' })
+      } else {
+        flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'username' })
+      }
+    } catch {
+      flash({ kind: 'error', text: '修改失败，请重试', owner: 'username' })
+    } finally {
+      setBusy(false)
+    }
+  }, [newUsername, usernamePassword, flash, setUsername])
 
   const inputStyle: CSSProperties = {
     width: '100%',
@@ -207,6 +234,57 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
             </div>
           )}
         </div>
+        {notice?.owner === 'account' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
+      </section>
+
+      <section>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px' }}>修改用户名</h2>
+        <form
+          onSubmit={(event) => {
+            event.preventDefault()
+            void changeUsername()
+          }}
+          style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
+        >
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+            新用户名
+            <input
+              type="text"
+              value={newUsername}
+              onChange={(event) => setNewUsername(event.target.value)}
+              autoComplete="username"
+              style={inputStyle}
+            />
+          </label>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+            当前密码
+            <input
+              type="password"
+              value={usernamePassword}
+              onChange={(event) => setUsernamePassword(event.target.value)}
+              autoComplete="current-password"
+              style={inputStyle}
+            />
+          </label>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <button
+              type="submit"
+              disabled={busy}
+              style={{ ...buttonStyle, background: '#4d6bfe', color: '#ffffff' }}
+            >
+              修改用户名
+            </button>
+            {notice?.owner === 'username' && (
+              <span style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d' }}>
+                {notice.text}
+              </span>
+            )}
+          </div>
+        </form>
       </section>
 
       <section>
@@ -256,7 +334,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
             >
               修改密码
             </button>
-            {notice !== undefined && (
+            {notice?.owner === 'password' && (
               <span style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d' }}>
                 {notice.text}
               </span>
