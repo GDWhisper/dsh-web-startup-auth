@@ -4,7 +4,7 @@
 
 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness)远程 Web 启动 + 用户名/密码认证插件。
 
-> **⚠️ 版本跟进声明**：本项目**不跟进官方 dsh 的 `alpha` 版本**，只关注 `latest` / `next` dist-tag。
+> **⚠️ 版本跟进声明**：本项目**只跟踪** `latest` dist-tag（官方稳定版），**不跟进** `next` dist-tag（alpha 通道）。
 
 ![登录页](docs/login-page.png)
 

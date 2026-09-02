@@ -4,7 +4,7 @@
 
 A [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness) plugin that enables **remote web startup with username/password authentication**.
 
-> **⚠️ Version tracking notice**: This project does **not** follow the official dsh `alpha` releases — only the `latest` / `next` dist-tags.
+> **⚠️ Version tracking notice**: This project **only tracks** the `latest` dist-tag (official stable releases) and **does not follow** the `next` dist-tag (alpha channel).
 
 ![Login page](docs/login-page.png)
 
