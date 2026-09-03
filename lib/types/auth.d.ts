@@ -5,20 +5,29 @@
  * - Refuse to start with `--host 0.0.0.0` unless credentials can be managed.
  * - Serve a login/register page at `/login`.
  * - Provide session management (signed cookies, 14-day expiry).
- * - Protect `/api` routes by wrapping the webserver's route registration.
+ * - Protect every registered route by wrapping the webserver's registration.
+ * - Bridge dsh 0.1.2's native browser authentication: mint the native
+ *   `dsh-auth-*` cookie for callers our session layer already trusts, so a
+ *   `dsh_sid` session (or a genuine loopback request) clears the upstream
+ *   `isAuthenticated` fence without exposing the launch-token URL flow.
  * - Provide a `webAuth` service that downstream transport layers can use.
  *
  * Wire-level enforcement:
  *   The plugin wraps `ctx.webServer.register` to inject a session check into
- *   every `/api` prefix route (except `/api/auth/*`). The `connection` row
- *   must inject `webAuth` so it activates after this plugin.
+ *   every registered route (except `/login` and `/api/auth/*`). The
+ *   `connection` row must inject `webAuth` so it activates after this plugin.
  *
- * Trust model:
- *   A request is trusted either by a valid session cookie, or by being a
- *   genuine loopback request — loopback peer address *and* loopback `Host`
- *   (see `isTrustedOrigin`). The bind address alone is not a trust signal:
- *   binding to 127.0.0.1 behind a reverse proxy still serves remote clients,
- *   whose forwarded `Host` names the public domain.
+ * Trust model (dsh 0.1.2):
+ *   Upstream now runs its own browser auth (`browser-auth.ts`): the `/api`
+ *   fence is `trust fence (403) + native-cookie check (401)` with NO loopback
+ *   exemption, and `index.html` is gated the same way. A valid `dsh_sid`
+ *   session — or a genuine loopback request (loopback peer address *and*
+ *   loopback `Host`, see `isTrustedOrigin`) — passes our wrapper, and the
+ *   wrapper mints the native cookie on the fly (single 303 hop for page
+ *   navigations) so the very next request satisfies upstream. The bind
+ *   address alone is not a trust signal: binding to 127.0.0.1 behind a
+ *   reverse proxy still serves remote clients, whose forwarded `Host` names
+ *   the public domain.
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';

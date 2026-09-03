@@ -7,7 +7,7 @@
  * the tab itself performs no RPC, so it depends only on the `slots` service.
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context } from '@deepseek-ai/cordis'
 // Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -15,19 +15,18 @@ import type { CSSProperties, ReactElement } from 'react'
 import { useCallback, useEffect, useState } from 'react'
 
 /**
- * Services required before the main body can be mounted. The PRIMARY timing
- * guarantee comes from the node half (`src/auth.ts`): a script injected into
- * the SPA index wraps `window.__ModuleLoader__.load` and flips
- * `connection.isLoopback` to true the moment the connection plugin's apply
- * returns — before cordis notifies any dependent fiber — so the settings
- * mirror and every scope are built in host mode regardless of this plugin's
- * own activation order (bundle loads finish out of order). This root plugin
- * still injects only `connection` and repeats the override as a defensive
- * layer: cordis activates a fiber as soon as its inject set is ready, and
- * connection is the earliest service in the boot graph, so this apply runs
- * early enough to matter even if the injected hook was ever lost.
+ * Service required before the section can be registered. The settings
+ * section ledger is contributed by the settings shell (`settings.section`
+ * slot declaration); the bundle-load order is not a timing guarantee, so the
+ * registration waits on the `slots` service instead.
+ *
+ * Note (0.1.2): the rc.8-0.1.1 `connection.isLoopback` override (both the
+ * node-half tapIndex hook and this plugin's defensive re-apply) is GONE —
+ * upstream's real cookie authentication made the remote-browser settings
+ * surfaces work natively, and the forced flag broke the web boot (26 entries
+ * pending; A/B verified 2026-09-03). No mirror guard is needed either.
  */
-export const inject = ['connection']
+export const inject = ['slots']
 
 /** Stable registration id inside the settings section list. */
 const SECTION_ID = 'auth'
@@ -349,55 +348,26 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
 /**
  * Register the auth section once the `settings.section` declaration is on
  * the ledger. The label is a plain string (no locale dependency).
+ *
+ * Note: 0.1.2 dropped the client-runtime aggregate type and the `slots`
+ * Context member is not re-declared by any package we depend on, so the
+ * service is read through a narrow structural assertion (cordis proxies the
+ * property at runtime; the `inject` set above is what guarantees it).
  * @param ctx - client root context.
  */
-export function apply(ctx: ClientContext): void {
-  // Remote browsers (address bar is a domain or LAN IP) are treated by the
-  // DSH frontend as non-loopback: ui-settings builds its settings mirror in
-  // memory mode and every `settingsScope.bind()` freezes its scope in memory
-  // mode, so per-namespace consumers (plugin-configuration cards) never
-  // derive any value and render nothing. The node half already treats a valid
-  // session as loopback-equivalent (Host/Origin rewriting), so the browser
-  // side is aligned here. The authoritative override is injected by the node
-  // half (`src/auth.ts`) ahead of the module system, so mirror construction
-  // and every bind() already see true; this apply re-applies it defensively
-  // (idempotent) for cases where the injected hook did not run. A getter (not
-  // a one-off assignment) keeps every later read true.
-  const connection = ctx.get('connection') as { isLoopback?: boolean } | undefined
-  if (connection !== undefined) {
-    Object.defineProperty(connection, 'isLoopback', {
-      configurable: true,
-      get: () => true,
-    })
+export function apply(ctx: Context): void {
+  interface SectionSlotRegistrar {
+    inject(name: string, supplier: () => unknown): void
+    register(
+      spec: { name: string; id: string; order: number; label: () => string },
+      component: unknown,
+    ): unknown
   }
-
-  // The tab registration and the mirror guard need `slots`/`settingsScope`,
-  // which are provided later in the boot. Declare them as a child plugin so
-  // cordis activates this body exactly when they are ready.
-  ctx.plugin({
-    inject: ['slots', 'settingsScope'],
-    apply: (sub: ClientContext): void => {
-      // Defensive fallback: if the mirror was somehow created in memory mode
-      // (rc.8 introduced the shared `settingsScope.mirror`; rc.7 has no
-      // mirror and skips), flip it back to host mode and read once. Note that
-      // a host mirror alone cannot repair scopes that were already bound in
-      // memory mode (they never subscribe to the mirror) — this guard only
-      // helps surfaces that read the mirror directly (e.g. the models page).
-      const scope = sub.get('settingsScope') as
-        | { mirror?: { persistence?: string; load?: () => void; getSnapshot?: () => { view?: unknown } } }
-        | undefined
-      const mirror = scope?.mirror
-      if (mirror !== undefined && mirror.persistence === 'memory' && typeof mirror.load === 'function') {
-        mirror.persistence = 'host'
-        void mirror.load()
-      }
-
-      sub.slots.inject('settings.section', () => sub.slots.register({
-        name: 'settings.section',
-        id: SECTION_ID,
-        order: 100,
-        label: () => '认证',
-      }, AuthSection))
-    },
-  })
+  const slots = (ctx as unknown as { slots?: SectionSlotRegistrar }).slots
+  slots?.inject('settings.section', () => slots.register({
+    name: 'settings.section',
+    id: SECTION_ID,
+    order: 100,
+    label: () => '认证',
+  }, AuthSection))
 }

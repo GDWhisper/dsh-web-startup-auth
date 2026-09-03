@@ -6,21 +6,20 @@
  * existing `/api/auth/*` endpoints served by the node half (`src/auth.ts`);
  * the tab itself performs no RPC, so it depends only on the `slots` service.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
+import type { Context } from '@deepseek-ai/cordis';
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ReactElement } from 'react';
 /**
- * Services required before the main body can be mounted. The PRIMARY timing
- * guarantee comes from the node half (`src/auth.ts`): a script injected into
- * the SPA index wraps `window.__ModuleLoader__.load` and flips
- * `connection.isLoopback` to true the moment the connection plugin's apply
- * returns — before cordis notifies any dependent fiber — so the settings
- * mirror and every scope are built in host mode regardless of this plugin's
- * own activation order (bundle loads finish out of order). This root plugin
- * still injects only `connection` and repeats the override as a defensive
- * layer: cordis activates a fiber as soon as its inject set is ready, and
- * connection is the earliest service in the boot graph, so this apply runs
- * early enough to matter even if the injected hook was ever lost.
+ * Service required before the section can be registered. The settings
+ * section ledger is contributed by the settings shell (`settings.section`
+ * slot declaration); the bundle-load order is not a timing guarantee, so the
+ * registration waits on the `slots` service instead.
+ *
+ * Note (0.1.2): the rc.8-0.1.1 `connection.isLoopback` override (both the
+ * node-half tapIndex hook and this plugin's defensive re-apply) is GONE —
+ * upstream's real cookie authentication made the remote-browser settings
+ * surfaces work natively, and the forced flag broke the web boot (26 entries
+ * pending; A/B verified 2026-09-03). No mirror guard is needed either.
  */
 export declare const inject: string[];
 /**
@@ -32,6 +31,11 @@ export declare function AuthSection(props: PropsRuntime<'settings.section'>): Re
 /**
  * Register the auth section once the `settings.section` declaration is on
  * the ledger. The label is a plain string (no locale dependency).
+ *
+ * Note: 0.1.2 dropped the client-runtime aggregate type and the `slots`
+ * Context member is not re-declared by any package we depend on, so the
+ * service is read through a narrow structural assertion (cordis proxies the
+ * property at runtime; the `inject` set above is what guarantees it).
  * @param ctx - client root context.
  */
-export declare function apply(ctx: ClientContext): void;
+export declare function apply(ctx: Context): void;

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
+import { createHash, createHmac } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { PassThrough } from 'node:stream'
@@ -7,6 +8,7 @@ import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
+import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { apply, type WebAuthService } from '../src/auth.ts'
 import {
   registerCredentials,
@@ -35,7 +37,7 @@ afterEach(() => {
 })
 
 /** Fake context that records every registered route for handler-level tests. */
-function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = []) {
+function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = [], credentials?: unknown, preFallback?: WebRoute['handler']) {
   const provided = new Map<string, unknown>()
   const routes: WebRoute[] = []
   const webServer = {
@@ -44,6 +46,7 @@ function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = []) {
     exact: new Map<string, WebRoute>(),
     prefixes: new Map<string, WebRoute>(),
     upgrades: new Map<string, { path: string; handler: (req: unknown, socket: unknown, head: unknown) => unknown }>(),
+    fallback: preFallback,
     register: (route: WebRoute) => {
       routes.push(route)
       const table = route.kind === 'exact' ? webServer.exact : webServer.prefixes
@@ -53,6 +56,10 @@ function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = []) {
     registerUpgrade: (route: { path: string; handler: (req: unknown, socket: unknown, head: unknown) => unknown }) => {
       webServer.upgrades.set(route.path, route)
       return () => {}
+    },
+    registerFallback: (handler: WebRoute['handler']) => {
+      webServer.fallback = handler
+      return () => { webServer.fallback = undefined }
     },
     tapIndex: () => {},
   }
@@ -66,6 +73,7 @@ function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = []) {
   const ctx = {
     get: (key: string) => {
       if (key === 'webStartup') return { trustedHosts: [] }
+      if (key === 'credentials') return credentials
       return undefined
     },
     provide: (key: string, value: unknown) => { provided.set(key, value) },
@@ -119,6 +127,8 @@ interface CapturedResponse {
   statusCode: number
   body: string
   setCookie?: string
+  setCookies?: string[]
+  location?: string
 }
 
 function jsonResponseCapture() {
@@ -127,12 +137,23 @@ function jsonResponseCapture() {
     writeHead: (code: number, headers?: Record<string, string | string[]>) => {
       captured.statusCode = code
       if (headers !== undefined) {
+        if (typeof headers.location === 'string') captured.location = headers.location
         const value = headers['set-cookie']
-        if (Array.isArray(value)) captured.setCookie = value[0]
-        else if (typeof value === 'string') captured.setCookie = value
+        if (Array.isArray(value)) {
+          captured.setCookies = [...value]
+          captured.setCookie = value[0]
+        } else if (typeof value === 'string') {
+          captured.setCookie = value
+          captured.setCookies = [value]
+        }
       }
     },
     end: (body?: string) => { captured.body = body ?? '' },
+    getHeader: (name: string) => {
+      if (name === 'set-cookie') return captured.setCookies
+      return undefined
+    },
+    setHeader: () => {},
   } as unknown as ServerResponse
   return { captured, res }
 }
@@ -231,14 +252,23 @@ describe('web-auth service', () => {
 
 // ── route wrapping coverage (all routes, retroactive + future) ───────────────
 
-/** A plain GET request with configurable Host and session cookie. */
-function httpRequest(opts: { host?: string; cookie?: string; ip?: string }): IncomingMessage {
+/** A plain GET request with configurable Host, session cookie and method. */
+function httpRequest(opts: {
+  url?: string
+  host?: string
+  cookie?: string
+  ip?: string
+  accept?: string
+  method?: string
+}): IncomingMessage {
   const headers: Record<string, string> = {}
   if (opts.host !== undefined) headers.host = opts.host
   if (opts.cookie !== undefined) headers.cookie = opts.cookie
+  if (opts.accept !== undefined) headers.accept = opts.accept
   return {
     headers,
-    method: 'GET',
+    method: opts.method ?? 'GET',
+    url: opts.url ?? '/',
     socket: { remoteAddress: opts.ip ?? '127.0.0.1' },
   } as unknown as IncomingMessage
 }
@@ -259,14 +289,15 @@ describe('route wrapping coverage', () => {
     const { routes } = fakeWebAuthContext('0.0.0.0', [thirdParty])
     const route = findRoute(routes, '/api/third-party')
 
-    // Remote caller + valid session: rewrites Host to loopback.
+    // Remote caller + valid session: forwarded with the Host untouched (no
+    // loopback rewriting in 0.1.2).
     const ok = jsonResponseCapture()
     await route.handler(
       httpRequest({ host: '192.168.5.216:3080', ip: '192.168.5.216', cookie: sessionCookie('admin') }),
       ok.res,
     )
     expect(ok.captured.statusCode).toBe(200)
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['192.168.5.216:3080'])
 
     // No session: rejected.
     const rejected = jsonResponseCapture()
@@ -274,10 +305,11 @@ describe('route wrapping coverage', () => {
     expect(rejected.captured.statusCode).toBe(401)
   })
 
-  it('rewrites the authority for a reverse-proxied caller on a loopback bind', async () => {
-    // dsh bound to 127.0.0.1 behind a proxy: the request arrives from loopback
-    // but carries the public Host, so it needs a session and the same
-    // loopback rewrite to clear dsh's privileged-method fence.
+  it('forwards a reverse-proxied caller with its public Host untouched', async () => {
+    // dsh bound to 127.0.0.1 behind a proxy: the request arrives from
+    // loopback but carries the public Host. The wrapper forwards it as-is —
+    // the native cookie is minted under the public authority so upstream's
+    // fence matches it (no Host rewriting in 0.1.2).
     registerCredentials('admin', 'secret1')
     const seenHosts: Array<string | undefined> = []
     const channel: WebRoute = {
@@ -296,7 +328,7 @@ describe('route wrapping coverage', () => {
     const ok = jsonResponseCapture()
     await route.handler(httpRequest({ ...proxied, cookie: sessionCookie('admin') }), ok.res)
     expect(ok.captured.statusCode).toBe(200)
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['dsh.example.com'])
 
     seenHosts.length = 0
     const rejected = jsonResponseCapture()
@@ -327,10 +359,10 @@ describe('route wrapping coverage', () => {
       ok.res,
     )
     expect(ok.captured.statusCode).toBe(200)
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['dsh.example.com:3080'])
   })
 
-  it('wraps upgrade routes so WebSocket handshakes pass the trust fence', async () => {
+  it('wraps upgrade routes so WebSocket handshakes still require a session', async () => {
     registerCredentials('admin', 'secret1')
     const seenHosts: Array<string | undefined> = []
     const { webServer } = fakeWebAuthContext('0.0.0.0')
@@ -343,14 +375,14 @@ describe('route wrapping coverage', () => {
     const upgradeRoute = webServer.upgrades.get('/api/events.mux')
     expect(upgradeRoute).toBeDefined()
 
-    // Remote caller + valid session: rewrites Host to loopback for the fence.
+    // Remote caller + valid session: forwarded with the Host untouched.
     const socket = { end: () => {} } as unknown as Duplex
     upgradeRoute!.handler(
       httpRequest({ host: 'dsh.example.com:3080', ip: '192.0.2.73', cookie: sessionCookie('admin') }),
       socket,
       Buffer.alloc(0),
     )
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['dsh.example.com:3080'])
 
     // No session: refused.
     seenHosts.length = 0
@@ -360,6 +392,284 @@ describe('route wrapping coverage', () => {
       Buffer.alloc(0),
     )
     expect(seenHosts).toEqual([])
+  })
+})
+
+// ── native browser-auth cookie bridge (dsh 0.1.2) ───────────────────────────
+//
+// Upstream signs its own `dsh-auth-<sha256(authority)>` cookie with a secret
+// in the credentials service. A caller our session layer trusts (valid
+// `dsh_sid` or genuine loopback) but that upstream does not know yet must be
+// handed that cookie; the bridge mints it in a single 303 hop for page
+// navigations and in the login-family responses.
+
+/** A fixed 32-byte secret for the fake credentials provider. */
+const FAKE_BROWSER_SECRET = Buffer.alloc(32, 7).toString('base64url')
+
+/** A fake credentials provider returning a fixed browser-session grant. */
+function fakeCredentials(record: unknown = { kind: 'grant', payload: { version: 1, secret: FAKE_BROWSER_SECRET } }) {
+  return { readRecord: async () => record }
+}
+
+/** Decode and verify a minted native cookie, returning its payload. */
+function expectValidNativeCookie(setCookie: string): { authority: string; issuedAt: number; expiresAt: number } {
+  const value = setCookie.split(';')[0]!.split('=').slice(1).join('=')
+  const [version, body, signature] = value.split('.')
+  expect(version).toBe('v1')
+  const expected = createHmac('sha256', Buffer.from(FAKE_BROWSER_SECRET, 'base64url'))
+    .update(body ?? '')
+    .digest('base64url')
+  expect(signature).toBe(expected)
+  const payload = JSON.parse(Buffer.from(body ?? '', 'base64url').toString('utf8'))
+  return payload
+}
+
+describe('native browser-auth cookie bridge', () => {
+  /** A downstream handler echoing success (mimics an authenticated page route). */
+  const okPage: WebRoute = {
+    kind: 'exact',
+    path: '/app',
+    handler: async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html></html>')
+    },
+  }
+
+  it('mints the native cookie on a 303 hop for an authenticated page navigation', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: '192.168.5.216:3080',
+        ip: '192.168.5.216',
+        accept: 'text/html',
+        cookie: sessionCookie('admin'),
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(303)
+    expect(captured.location).toBe('/app')
+    expect(captured.setCookies).toHaveLength(1)
+    const payload = expectValidNativeCookie(captured.setCookie ?? '')
+    // The cookie is bound to the caller's own authority, never a loopback one.
+    expect(payload.authority).toBe('192.168.5.216:3080')
+  })
+
+  it('mints the native cookie for a genuine loopback caller (local browser)', async () => {
+    // No credentials registered at all: the loopback caller is implicitly
+    // trusted, and the bridge lets its very next request clear upstream.
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({ url: '/app', host: '127.0.0.1:3080', ip: '127.0.0.1', accept: 'text/html' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(303)
+    const payload = expectValidNativeCookie(captured.setCookie ?? '')
+    expect(payload.authority).toBe('127.0.0.1:3080')
+  })
+
+  it('forwards a caller that already holds the native cookie', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    // The native cookie name derives from the authority: sha256 over the
+    // URL-normalized host, base64url, prefixed with dsh-auth-.
+    const authority = new URL('http://dsh.example.com').host
+    const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
+    const native = `${name}=v1.placeholder.sig`
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        host: 'dsh.example.com',
+        ip: '192.0.2.80',
+        accept: 'text/html',
+        cookie: `${sessionCookie('admin')}; ${native}`,
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+  })
+
+  it('does not mint while the upstream signing secret is absent', async () => {
+    registerCredentials('admin', 'secret1')
+    const noSecretProvider = { readRecord: async () => undefined }
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], noSecretProvider)
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        host: 'dsh.example.com',
+        ip: '192.0.2.81',
+        accept: 'text/html',
+        cookie: sessionCookie('admin'),
+      }),
+      res,
+    )
+    // Secret not ready yet: forwarded as-is; the next request retries.
+    expect(captured.statusCode).toBe(200)
+  })
+
+  it('forwards non-navigations without a 303 hop (RPC must not become GET)', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    // POST (no accept header, no sec-fetch-mode): forwarded untouched even
+    // without the native cookie — a redirect would turn the RPC into a GET.
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: 'dsh.example.com',
+        ip: '192.0.2.82',
+        cookie: sessionCookie('admin'),
+        method: 'POST',
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+  })
+
+  it('redirects an unauthenticated page navigation to /login', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage])
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({ url: '/app', host: 'dsh.example.com', ip: '192.0.2.83', accept: 'text/html' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(302)
+    expect(captured.location).toBe('/login')
+  })
+
+  it('rejects an unauthenticated XHR/RPC with 401 instead of a redirect', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage])
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({ url: '/app', host: 'dsh.example.com', ip: '192.0.2.84' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('clears the native cookie on logout', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [], fakeCredentials())
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/logout').handler(
+      httpRequest({ host: 'dsh.example.com', ip: '192.0.2.85', method: 'POST' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(captured.setCookies?.[0]).toMatch(/^dsh_sid=; .*Max-Age=0/)
+    const nativeClear = captured.setCookies?.find((cookie) => cookie.startsWith('dsh-auth-'))
+    expect(nativeClear).toBeDefined()
+    expect(nativeClear).toContain('Max-Age=0')
+  })
+
+  it('issues both cookies from a successful login response', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [], fakeCredentials())
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/login').handler(
+      jsonRequest('POST', { username: 'admin', password: 'secret1' }, {
+        ip: '192.0.2.86',
+        host: 'dsh.example.com',
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(captured.setCookie).toMatch(/^dsh_sid=/)
+    expect(captured.setCookies).toHaveLength(2)
+    const native = captured.setCookies?.find((cookie) => cookie.startsWith('dsh-auth-'))
+    expect(native).toBeDefined()
+    const payload = expectValidNativeCookie(native ?? '')
+    expect(payload.authority).toBe('dsh.example.com')
+  })
+})
+
+// The 0.1.2 SPA index is served through the webserver's fallback seat
+// (`registerFallback`), OUTSIDE the exact/prefix route tables, so it needs
+// the same wrapping or it would bypass the session check entirely.
+describe('index fallback seat wrapping', () => {
+  /** A stand-in for frontend-static's index handler. */
+  const indexFallback: WebRoute['handler'] = async (_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/html' })
+    res.end('<html>index</html>')
+  }
+
+  it('wraps a fallback registered before web-auth activated', async () => {
+    registerCredentials('admin', 'secret1')
+    const { webServer } = fakeWebAuthContext('0.0.0.0', [], fakeCredentials(), indexFallback)
+    const fallback = webServer.fallback
+    expect(fallback).toBeDefined()
+
+    // Remote caller, no session: redirected to the login page, not served.
+    const rejected = jsonResponseCapture()
+    await fallback!(
+      httpRequest({ host: 'dsh.example.com', ip: '192.0.2.87', accept: 'text/html' }),
+      rejected.res,
+    )
+    expect(rejected.captured.statusCode).toBe(302)
+    expect(rejected.captured.location).toBe('/login')
+
+    // Authenticated remote caller without the native cookie: 303 + mint.
+    const minted = jsonResponseCapture()
+    await fallback!(
+      httpRequest({
+        host: 'dsh.example.com',
+        ip: '192.0.2.88',
+        accept: 'text/html',
+        cookie: sessionCookie('admin'),
+      }),
+      minted.res,
+    )
+    expect(minted.captured.statusCode).toBe(303)
+    expect(minted.captured.location).toBe('/')
+    const payload = expectValidNativeCookie(minted.captured.setCookie ?? '')
+    expect(payload.authority).toBe('dsh.example.com')
+  })
+
+  it('wraps a fallback registered after web-auth activated', async () => {
+    registerCredentials('admin', 'secret1')
+    const { webServer } = fakeWebAuthContext('0.0.0.0', [], fakeCredentials())
+    // Register through the wrapped registerFallback.
+    webServer.registerFallback(indexFallback)
+    const fallback = webServer.fallback
+    expect(fallback).toBeDefined()
+
+    // Genuine loopback caller: implicitly trusted, and the native cookie is
+    // minted so its next request clears upstream's own gate.
+    const minted = jsonResponseCapture()
+    await fallback!(
+      httpRequest({ host: '127.0.0.1:3080', ip: '127.0.0.1', accept: 'text/html' }),
+      minted.res,
+    )
+    expect(minted.captured.statusCode).toBe(303)
+    expectValidNativeCookie(minted.captured.setCookie ?? '')
+
+    // The wrapped handler still serves the index once the caller is known.
+    const served = jsonResponseCapture()
+    const authority = new URL('http://127.0.0.1:3080').host
+    const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
+    await fallback!(
+      httpRequest({
+        host: '127.0.0.1:3080',
+        ip: '127.0.0.1',
+        accept: 'text/html',
+        cookie: `${name}=v1.x.y`,
+      }),
+      served.res,
+    )
+    expect(served.captured.statusCode).toBe(200)
+    expect(served.captured.body).toBe('<html>index</html>')
   })
 })
 

@@ -3,6 +3,7 @@
 > 写给接手本插件的 LLM/开发者。本文基于 harness 源码 tag `dsh-v0.1.2-alpha.1` 的实地核查（2026-08-29），不是猜测。
 > **写作时点**：npm 官方 registry 尚未发布 0.1.2-alpha.1（`@deepseek-ai/dsh` latest/next = 0.1.1-rc.2），本机 dsh 也是 0.1.1-rc.2——**升级前本插件一切正常，本文是预演**。
 > **2026-08-31 更新**：`0.1.2-alpha.2` 已发布，但**只在 `alpha` dist-tag**（registry 上 alpha.1 已撤，`next`/`latest` 仍是 0.1.1-rc.2）。当日做了实机兼容性测试（见文末「2026-08-31 实测记录」），破坏模式与本文预言完全一致；**决策：等 `next` 或 `latest` 推进到 0.1.2 再执行迁移**（裸 `npm i -g @deepseek-ai/dsh` 的用户暂时不会撞上），期间保持 0.1.1-rc.2。
+> **2026-09-03 更新（rc.1 源码复核，行号修正）**：`0.1.2-rc.1` 发布到 `next` dist-tag（06:21 UTC），`latest` 仍 0.1.1-rc.2——**触发条件 A 正式满足**。当日浅抓 `dsh-v0.1.2-rc.1` tag 对本文全部论断做静态复核（未实机）：破坏点 1–5 逐项属实（`browser-auth.ts` 313 行原样；`rpc-host.ts:96-99` 双闸门原样；`PRIVILEGED_METHODS`、`authority:"loopback"` channel grep 零命中确已删；`dsh-client-runtime` 目录不存在；connection `inject=['webServer','credentials']`、`apply` async 在 `connection/src/index.ts:67,:99`）；「不变」清单除 isLoopback 覆盖外全部健在。**修正行号/位置偏差**（依据 = rc.1 tag 上的 `git show` 实读，下文已就地更新）：token URL 打印 `272-281`→`271-280`；connection client `isLoopback` 判定 `172`→`228`；settings-scope 的 isLoopback 判定读点迁至 `ui-settings/src/client/index.ts:58`（`ctx.remote.$host.isLoopback`，冻结机制本体仍在 settings-scope.ts）。另核实：`frontend-static` 的 `authorizeIndex` 引用 `:89,139` 与本文一致；client.js 分发 URL 在 `modules/src/index.ts:256`（`/plugins/??${resources}&rev=${rev}`）；webserver exact 优先于 prefix 在 `webserver/src/index.ts:317-320`。alpha.2→rc.1 的 diff 仅 `invariant.ts` 内联清理（各包共享工具删）与 connection 客户端重试微调，与本插件无关。**⚠️ 实机验证后（当日完成迁移）两项新结论已写回代码与文档，见文末「2026-09-03 实测记录」：① isLoopback 覆盖在 0.1.2 有害（web boot 26 entries pending），rc.8–0.1.1 的「浏览器端 scope gate」解法已整体删除；② webserver 0.1.2 新增 `registerFallback` index 座，路由保护必须含它。**
 
 ## 触发条件（什么时候开始做）
 
@@ -13,6 +14,10 @@
 
 **2026-08-31 现况**：`0.1.2-alpha.2` 只发在 `alpha` tag（alpha.1 已从 registry 撤下），`next`/`latest` 仍是 `0.1.1-rc.2`——裸 `npm i -g @deepseek-ai/dsh` 的用户不会撞上。**决策（用户拍板）：不为 `alpha` tag 提前动工，等 `next`/`latest` 推进再执行本文**；只有上面第二条（真实用户报错）出现时才提前介入。
 
+**2026-09-03 现况**：`next` = `0.1.2-rc.1`（触发条件 A **满足**），`latest`仍 `0.1.1-rc.2`，`alpha` = `0.1.2-alpha.5`——裸 `npm i -g` 用户仍安全；本机 dsh 与插件依赖维持 0.1.1-rc.2。rc.1 源码复核结论见文首 2026-09-03 更新：本文 P0/P1 方案无需修订。
+
+**决策更新（2026-09-03，用户拍板，原「等 latest」作废）**：README.md 的版本跟进声明承诺**只跟进 `next` dist-tag、不跟 `alpha`**（README.en.md 原写反为「跟 latest」，已当日修正对齐）——因此 **`next` 推进到 0.1.2 即触发迁移，不等 `latest`**。当日按本文开始执行迁移。
+
 ## 上游变化摘要（已核查的证据）
 
 harness 仓库位置：`/home/pax/coding/research/deepseek-harness`。拉取新 tag 时 git 直连/flaky 时走代理：
@@ -20,8 +25,8 @@ harness 仓库位置：`/home/pax/coding/research/deepseek-harness`。拉取新 
 
 ### 破坏性（正面对撞本插件）
 
-1. **dsh 原生新增浏览器认证**（`packages/client/connection/src/browser-auth.ts`，313 行）：
-   - `dsh web` 启动打印带 `?token=` 的 URL（含 LAN 变体，`packages/bundle/web-app/src/index.ts:272-281`）；访问后 303 换取签名 cookie。
+1. **dsh 原生新增浏览器认证**（`packages/client/connection/src/browser-auth.ts`，313 行；rc.1 复核：行数与内容与 alpha.2 一致）：
+   - `dsh web` 启动打印带 `?token=` 的 URL（含 LAN 变体，`packages/bundle/web-app/src/index.ts:271-280` 的 `announceReady`——rc.1 实读修正，原引用 272-281 差一行）；访问后 303 换取签名 cookie。
    - cookie 名 = `dsh-auth-` + base64url(sha256(authority))，**authority 取自请求 Host 头**；值 = `v1.` + base64url(JSON`{version:1,authority,issuedAt,expiresAt}`) + `.` + base64url(HMAC-SHA256(secret,body))；`HttpOnly; SameSite=Strict`；有效期默认 30 天（`cookieMaxAgeDays` 配置，`connection/src/index.ts` ConnectionConfig）。
    - 签名密钥 = 32 字节随机，base64url 后存 credentials 服务：`credentialKey('client-connection','browser-session')`，record `{kind:'grant', payload:{version:1, secret}}`；持久、跨重启不失效，**无账号概念、无撤销**。
    - `connection` 插件 `inject` 变为 `['webServer','credentials']`，`apply` 变 async。
@@ -36,9 +41,9 @@ harness 仓库位置：`/home/pax/coding/research/deepseek-harness`。拉取新 
 - `webServer` API 仅增量加 gzip：`register/registerUpgrade/tapIndex`、私有路由表 `exact/prefixes/upgrades` 原样（`packages/host/webserver/src/index.ts:133-138`）→ 本插件的事后追溯包装机制不变。
 - patch 行 id `web-startup` / `connection` 仍在；`webRuntime` 服务仍由 web-app 提供 → 我方 `cordis.patch.yml` 的 `connection inject: [webServer, webRuntime, webAuth]` 与包根行保持。
 - 前端插件机制原样：`__ModuleLoader__`/`mode='live'`/`__DSH_BOOT__`/`dsh.client` 扫描。**注意（2026-08-31 实测）**：alpha.2 起 `client.js` 分发 URL 变为 `/plugins/??<id>/client.js&rev=…`（boot 图 entry 的 `url` 字段），旧路径 `/plugins/<id>/client.js` 变 404——验收时从 `__DSH_BOOT__` 里取真实 URL 请求。
-- 浏览器 `isLoopback` 仍按页面 hostname 判定（`connection/src/client/index.ts:172`）、settings-scope 仍按它冻结 persistence（`ui-settings/src/client/settings-scope.ts:291`）→ **isLoopback getter 覆盖仍然必要且机制有效**。
+- 浏览器 `isLoopback` 仍按页面 hostname 判定（`connection/src/client/index.ts:228`，rc.1 实读修正，alpha.1 原引用为 :172）；0.1.2 的 settings-scope 判定读点在 `ui-settings/src/client/index.ts:58`（`ctx.remote.$host.isLoopback ? 'host' : 'memory'`）。**⚠️ rc.8–0.1.1 的「isLoopback getter 覆盖」解法在 0.1.2 已删除且不可恢复**（0.1.2 代码有按 isLoopback 门控的回环专属路径，强改 true 破坏 web boot；上游真实认证后远程设置面原生可用）——详见文末「2026-09-03 实测记录」第 2 条。
 - `settings.section` slot 契约与 `settingsScope` 服务健在 →「认证」标签页不用动。
-- 本插件的 `/login` 与 `/api/auth/*` 是 **exact 路由**，查找时优先于 connection 的 `/api` prefix 路由 → 匿名可达性不受原生闸门影响。
+- 本插件的 `/login` 与 `/api/auth/*` 是 **exact 路由**，查找时优先于 connection 的 `/api` prefix 路由（依据：rc.1 `packages/host/webserver/src/index.ts:317-320`，exact 表命中先于 longest-prefix 回退）→ 匿名可达性不受原生闸门影响。
 
 ## 升级后必改清单（按优先级）
 
@@ -94,7 +99,7 @@ harness 仓库位置：`/home/pax/coding/research/deepseek-harness`。拉取新 
 
 1. diff `packages/client/connection/src/browser-auth.ts`（cookie 格式/密钥存储位置变了 → 补签逻辑要跟）；
 2. 查 `packages/bundle/web-app/src/startup.ts` 的 0.0.0.0 拒绝是否还在；
-3. 查 `connection/src/client/index.ts` 的 `isLoopback` 判定与 `ui-settings/src/client/settings-scope.ts` 的冻结逻辑是否还按浏览器 hostname；
+3. 查 `connection/src/client/index.ts` 的 `isLoopback` 判定是否仍按浏览器 hostname；查 `ui-settings/src/client/index.ts` 的 persistence 判定（rc.1 起在 `:58` 的 `ctx.remote.$host.isLoopback`，原在 settings-scope.ts:291）是否仍读 connection 服务的 `isLoopback` 属性——读法若变，isLoopback getter 覆盖要跟着改；
 4. 查上游 release notes / `packages/client/AGENTS.md` 是否出现「account / password / revoke / logout」类能力；
 5. 查 `npm view @deepseek-ai/dsh dist-tags` 的 `next`/`latest`/`alpha` 分别指向哪里（触发条件看前两者）；顺带确认 profile 里第三方 bundle 与前端 `client.js` 分发 URL 格式有无再变。
 
@@ -130,3 +135,13 @@ harness 仓库位置：`/home/pax/coding/research/deepseek-harness`。拉取新 
 **测试方法备忘**：无法提供真实密码时，可用 `~/.dsh/web-auth.json` 的 `secret` 本地自签 `dsh_sid`（`base64url(JSON{u,e}).hexHMAC-SHA256(secret)`）验证会话路径——只读凭据文件，不改状态。
 
 **处置**：测试后全局 dsh 与 `dshmarket` 均已回滚原版本、`dsh web --host 0.0.0.0` 重启回归通过。**维持「等 `next`/`latest` 推进再迁移」的决策**（见触发条件节）。
+
+## 2026-09-03 实测记录（dsh 0.1.2-rc.1 实机迁移）
+
+当日按 README 版本声明（跟进 next）拍板迁移：全局 dsh 升 0.1.2-rc.1，profile 升 dshmarket 1.41.0（dshmarket 从 ^1.29.2 起升；0.1.1 时代的旧版在 0.1.2 上会启动失败，见 08-31 记录），执行本文 P0/P1（删改写、加补签、清 client-runtime、全链路测试 74 个全过），随后实机验收。**手册 P0/P1 全部适用；另有两个手册未预料到、必须写回代码/文档的发现：**
+
+**1. webserver 0.1.2 新增 index fallback 座（`registerFallback`）——路由保护必须含它。** 0.1.2 的 SPA index 由 frontend-static 经 `webServer.registerFallback` 提供（webserver 私有单座 `fallback` 属性 + `registerFallback` 方法，`webserver/src/index.ts:196`），**不在 exact/prefix 路由表里**——只包装 register/registerUpgrade 时，远程与回环访问 `/` 都直接撞上游 `authorizeIndex` 的 401 纯文本（curl 实测：`dsh web authentication required`）。包装法：事后追溯时替换私有 `fallback` 字段 + 包装 `registerFallback` 方法两路都做（与普通路由同款认证/补签逻辑）。**观察哨增补：每次上游发版查 webserver 路由入口是否还有新增（fallback 已载入本文「不变」清单的既有核对路径）。**
+
+**2. 浏览器端 isLoopback 覆盖在 0.1.2 有害，必须删除。** 实测 A/B：保留 rc.8–0.1.1 的 isLoopback 覆盖（node tapIndex 注入 + 前端防御重放）时，**web boot 失败**——UI 显示 `web boot: 26 entries did not activate`（session/uiSession/remote.session/remote.workspace 等核心服务链全部 pending，console 无单个 cause，LAN 与回环一致）；删掉覆盖后 boot 立即可用。原因方向：0.1.2 代码有按 isLoopback 门控的「回环专属路径」，强制 true 触发之但对应 RPC/本地能力不存在。且 0.1.2 真实认证后远程浏览器（已登录）原生可用全部设置面（LAN 实测：通用设置/模型/插件/插件市场/认证五个 section 全渲染、无 "settings are unavailable"），覆盖已无存在必要。**因此本文「不变」部分对 isLoopback 覆盖的判断过时，AGENTS/README/前端代码已同步删除；恢复旧逻辑见 git 历史 `installIsLoopbackOverride`。**
+
+**验收结果（LAN 192.168.5.216 实测，会话用 web-auth.json secret 自签 dsh_sid）**：未登录页面导航 → 302 /login；登录响应双 cookie（dsh_sid + dsh-auth-*）；持 dsh_sid 首次 GET / → 303 补签 → 重放 200 index；仅原生 cookie 无 dsh_sid → 302 /login（dsh_sid 仍唯一边界）；特权 API（settings/credentials/session/agentPresets describe/list）全 200（0.1.1 时代会 403）；事件流 EventSource /plugins/events 200；client.js 新 URL（`/plugins/??dsh-web-startup-auth/client.js&rev=…`）200、无会话 401；登出返回双 cookie 清除（Max-Age=0）；「认证」标签页在设置面板渲染（显示当前登录用户名 wpxxl、退出/改用户名/改密码）。真实浏览器（chromium headless via agent-browser）LAN 主界面、设置面板全部正常。
