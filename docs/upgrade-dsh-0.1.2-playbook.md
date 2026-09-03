@@ -145,3 +145,14 @@ harness 仓库位置：`/home/pax/coding/research/deepseek-harness`。拉取新 
 **2. 浏览器端 isLoopback 覆盖在 0.1.2 有害，必须删除。** 实测 A/B：保留 rc.8–0.1.1 的 isLoopback 覆盖（node tapIndex 注入 + 前端防御重放）时，**web boot 失败**——UI 显示 `web boot: 26 entries did not activate`（session/uiSession/remote.session/remote.workspace 等核心服务链全部 pending，console 无单个 cause，LAN 与回环一致）；删掉覆盖后 boot 立即可用。原因方向：0.1.2 代码有按 isLoopback 门控的「回环专属路径」，强制 true 触发之但对应 RPC/本地能力不存在。且 0.1.2 真实认证后远程浏览器（已登录）原生可用全部设置面（LAN 实测：通用设置/模型/插件/插件市场/认证五个 section 全渲染、无 "settings are unavailable"），覆盖已无存在必要。**因此本文「不变」部分对 isLoopback 覆盖的判断过时，AGENTS/README/前端代码已同步删除；恢复旧逻辑见 git 历史 `installIsLoopbackOverride`。**
 
 **验收结果（LAN 192.168.5.216 实测，会话用 web-auth.json secret 自签 dsh_sid）**：未登录页面导航 → 302 /login；登录响应双 cookie（dsh_sid + dsh-auth-*）；持 dsh_sid 首次 GET / → 303 补签 → 重放 200 index；仅原生 cookie 无 dsh_sid → 302 /login（dsh_sid 仍唯一边界）；特权 API（settings/credentials/session/agentPresets describe/list）全 200（0.1.1 时代会 403）；事件流 EventSource /plugins/events 200；client.js 新 URL（`/plugins/??dsh-web-startup-auth/client.js&rev=…`）200、无会话 401；登出返回双 cookie 清除（Max-Age=0）；「认证」标签页在设置面板渲染（显示当前登录用户名 wpxxl、退出/改用户名/改密码）。真实浏览器（chromium headless via agent-browser）LAN 主界面、设置面板全部正常。
+
+### 2026-09-03 追加补记（真实 LAN 远程浏览器验收——上面第 2 条结论不实，已修正）
+
+当日稍晚用真实浏览器从 **LAN IP（192.168.5.216）** 而非回环地址打开设置面板，发现上文第 2 条「0.1.2 远程浏览器（已登录）原生可用全部设置面、五个 section 全渲染、无 unavailable」**只对回环地址成立，不实**：
+
+- **症状**（用户报告 + 复现）：LAN 已登录浏览器里，设置面板五个 section 中通用设置/插件/Agent 预设/插件市场/认证全部渲染，**唯独 Models（「提供方目录」）报 `加载提供方目录失败: settings are unavailable in this browser`**，控制台另见 `GET /manifest.webmanifest 401`（manifest 是 fallback 静态资源，无有效 `dsh_sid` 的请求经我方包装器回 401）。
+- **根因**：ui-settings 的 settings mirror 持久化由 `ctx.remote.$host.isLoopback` 判定（rc.1 `dsh-client-ui-settings/lib/client.js` 的 `apply`），`$host.isLoopback` 经 api-gateway 转写 `connection.isLoopback` = **只看 `location.hostname`**。LAN 浏览器 → `memory` 模式 → mirror 永不读 host（`load`/`ensure` 直接 resolve）→ `ModelsSettingsStore.load()` 见 `view===undefined` 抛 unavailable（`ui-settings-models/src/client/store.ts`）。**不是 401 权限问题，RPC 根本没发**（实测 network 无 4xx/5xx）。
+- **为什么早先没发现**：当日 A/B 与「五 section」验证的 headless 浏览器打的是回环地址，把回环结论错当成 LAN 通用。
+- **修复（已落地）**：删覆盖、又不能恢复 node 侧 getter 覆盖（A/B 证明破坏 boot）——**正解是 tapIndex 注入 `window.__DSH_TRANSPORT__ = window.__DSH_TRANSPORT__ || { ownsHost: true }`**：connection client 构造时 `isLoopback: transport?.ownsHost === true || …` 直接为 true，api/rpc 缺省字段安全降级（`WebApiClient` / `globalThis.fetch`），且不重写 cordis 服务。实机 A/B：LAN 与回环的 Models 面均正常渲染 provider directory、boot 无 26 entries pending、无 console 错误、无 4xx。
+- **另一条试错（记录以免重走）**：曾想在 `cordis.patch.yml` 给 `ui-settings` 追加 inject marker 让浏览器端 ui-settings 排在本插件后激活——cordis patch 只作用于 node half，直接让 server boot 卡死（`ui-settings: pending (waiting for service: …)`），client half 依赖由 `dsh.client.inject` 声明、patch 改不到。作废（git 历史含 `webAuthMirrorHookReady`）。
+- **观察哨增补**：上游若改 connection `isLoopback` 计算式或移除 `__DSH_TRANSPORT__` 钩子，`__DSH_TRANSPORT__.ownsHost` 方案要跟着改（见第 3 条观察哨）。

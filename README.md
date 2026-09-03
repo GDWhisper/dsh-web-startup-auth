@@ -78,7 +78,7 @@ dsh web --host 0.0.0.0
 - **凭据文件权限**：`~/.dsh/web-auth.json`（含密码哈希与会话签名密钥）以 `0600` 保存，目录以 `0700` 创建；插件启动时会自动修复旧版本遗留的过宽权限。
 - **`--trusted-host`**：该参数仅为与原版 CLI 兼容而保留透传，**不参与本插件认证判断**——远程客户端一律需要有效会话，不存在"受信主机免登录"。
 - **反向代理（nginx 等）部署**：可以放心的做法是 dsh 只监听 `127.0.0.1`，由代理做 SSL 卸载并转发。此时**代理必须转发真实 `Host`**（nginx 默认即为 `proxy_set_header Host $host;`，配上 `--trusted-host <域名>` 让 DSH 自身的 Host 围栏放行）；认证通过后插件按**请求的真实 `Host`（公网域名）**补发上游原生浏览器 cookie，上游闸门据此放行。反之，若代理把 `Host` 写死成 `127.0.0.1`，插件会认为请求来自本机从而**放行全部流量、不做认证**——不要这样配置。`X-Forwarded-For` 不被采信（客户端可伪造），信任判定只看 TCP 对端地址与 `Host`。
-- **上游兼容层（dsh 0.1.2 基线）**：dsh rc.8–0.1.1 时代，DSH 前端用**浏览器地址栏 hostname** 判定 `connection.isLoopback`，远程浏览器下的 settings mirror 走内存模式、插件配置卡片与 Models 页不可用；本插件当时通过 `webServer.tapIndex` 注入脚本在 connection 激活瞬间把该标志覆盖为恒 `true`。**0.1.2 起该覆盖已删除**：上游改用真实 cookie 认证后，远程浏览器（已登录）本就能正常使用全部设置面（LAN 实测五个设置 section 均渲染、无 "settings are unavailable"），强行覆盖反而会导致 web boot 失败（26 个前端插件 pending）。当前保留的浏览器侧 shim 只有 `crypto.randomUUID` polyfill。
+- **上游兼容层（dsh 0.1.2 基线）**：dsh rc.8–0.1.1 时代，DSH 前端用**浏览器地址栏 hostname** 判定 `connection.isLoopback`，远程浏览器下的 settings mirror 走内存模式、插件配置卡片与 Models 页不可用；本插件当时通过 `webServer.tapIndex` 注入脚本在 connection 激活瞬间把该标志覆盖为恒 `true`。0.1.2 上游引入真实 cookie 认证后**能进 UI**，但 settings mirror 仍按同一标志判定——LAN 浏览器依旧得到从不读 host 的 `memory` mirror，设置面板的 Models（提供方目录）会报 "settings are unavailable in this browser"。直接恢复旧的 getter 覆盖会破坏 web boot（A/B 实测 26 个前端插件 pending），因此 0.1.2 起改用**注入 `window.__DSH_TRANSPORT__ = { ownsHost: true }`**：connection client 构造时据此把 `isLoopback` 报为 `true`（api/rpc 字段缺省时安全回退，且不重写 cordis 服务），LAN 与回环浏览器的全部设置面（含 Models）都正常渲染。当前保留的浏览器侧 shim：该 transport hook 与 `crypto.randomUUID` polyfill（明文 HTTP 非安全上下文所需）。
 
 ## 开发
 

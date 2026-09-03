@@ -21,10 +21,14 @@ import { useCallback, useEffect, useState } from 'react'
  * registration waits on the `slots` service instead.
  *
  * Note (0.1.2): the rc.8-0.1.1 `connection.isLoopback` override (both the
- * node-half tapIndex hook and this plugin's defensive re-apply) is GONE —
- * upstream's real cookie authentication made the remote-browser settings
- * surfaces work natively, and the forced flag broke the web boot (26 entries
- * pending; A/B verified 2026-09-03). No mirror guard is needed either.
+ * node-half tapIndex hook and this plugin's defensive re-apply) is GONE.
+ * Upstream's real cookie authentication lets a remote browser into the UI,
+ * but ui-settings still builds its settings mirror from
+ * `connection.isLoopback` (`location.hostname`), so LAN browsers get a
+ * `memory` mirror whose Models section reports "settings are unavailable in
+ * this browser". The tapIndex hook sets `window.__DSH_TRANSPORT__` with
+ * `ownsHost: true` instead — that makes connection report loopback without
+ * rewriting the cordis service. No mirror guard is needed here.
  */
 export const inject = ['slots']
 
