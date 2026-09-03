@@ -48,6 +48,8 @@ import {
   changePassword,
   changeUsername,
   getUsername,
+  getRequireLoopbackLogin,
+  setRequireLoopbackLogin,
   normalizeUsername,
   MIN_PASSWORD_LENGTH,
 } from './credential-store.ts'
@@ -327,6 +329,10 @@ function isLoopbackRemoteAddress(address: string | undefined): boolean {
  * @returns `true` when the request needs no session cookie.
  */
 function isTrustedOrigin(req: IncomingMessage): boolean {
+  // An administrator may require every address — loopback included — to present
+  // a session. When the persisted flag is on, loopback is no longer implicitly
+  // trusted (the default, flag-off behavior keeps loopback trusted).
+  if (getRequireLoopbackLogin()) return false
   return isLoopbackRemoteAddress(req.socket?.remoteAddress) &&
     isLoopbackAuthority(req.headers.host)
 }
@@ -801,6 +807,55 @@ export function apply(ctx: Context, _config: Config): void {
             return
           }
           ctx.logger.warn('web-auth: change-username failed: %s', error instanceof Error ? error.message : String(error))
+          jsonResponse(res, 500, { error: '服务器内部错误' })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/auth/policy',
+      handler: async (req, res) => {
+        // Reading and flipping the switch requires an authenticated caller,
+        // mirroring change-password: a session cookie for a remote caller,
+        // or the implicit trust of a genuine loopback request while the
+        // switch itself is still off.
+        try {
+          if (!isAuthorized(req)) {
+            jsonResponse(res, 401, { error: '未登录或会话已过期' })
+            return
+          }
+          if (req.method === 'GET') {
+            jsonResponse(res, 200, { requireLoopbackLogin: getRequireLoopbackLogin() })
+            return
+          }
+          if (req.method !== 'POST') {
+            res.writeHead(405)
+            res.end()
+            return
+          }
+          const body = await parseBody(req)
+          const requireLoopbackLogin = body.requireLoopbackLogin
+          if (typeof requireLoopbackLogin !== 'boolean') {
+            jsonResponse(res, 400, { error: 'requireLoopbackLogin 必须为布尔值' })
+            return
+          }
+          try {
+            setRequireLoopbackLogin(requireLoopbackLogin)
+          } catch (error) {
+            // Enabling before any admin exists would lock out every caller
+            // (loopback included): there would be no account to log into.
+            ctx.logger.warn('web-auth: policy update failed: %s', error instanceof Error ? error.message : String(error))
+            jsonResponse(res, 400, { error: '请先注册管理员账号，再开启强制登录' })
+            return
+          }
+          ctx.logger.info('web-auth: requireLoopbackLogin set to %s (from %s)', requireLoopbackLogin, clientIp(req) ?? 'unknown')
+          jsonResponse(res, 200, { ok: true, requireLoopbackLogin })
+        } catch (error) {
+          if (isBodyTooLarge(error)) {
+            jsonResponse(res, 413, { error: '请求体过大' })
+            return
+          }
+          ctx.logger.warn('web-auth: policy endpoint failed: %s', error instanceof Error ? error.message : String(error))
           jsonResponse(res, 500, { error: '服务器内部错误' })
         }
       },

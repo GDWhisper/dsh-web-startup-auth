@@ -58,8 +58,30 @@ function useUsername(): [string | undefined, (username: string) => void] {
   return [username, setUsername]
 }
 
+/** The switch state shown in the tab (false until the policy fetch resolves). */
+function useRequireLoopbackLogin(): [boolean, (value: boolean) => void] {
+  const [requireLoopbackLogin, setRequireLoopbackLogin] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/auth/policy')
+        if (!res.ok) return
+        const data = (await res.json()) as { requireLoopbackLogin?: boolean }
+        if (!cancelled && typeof data.requireLoopbackLogin === 'boolean') {
+          setRequireLoopbackLogin(data.requireLoopbackLogin)
+        }
+      } catch {
+        // Policy is best-effort; the tab still renders with the switch off.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  return [requireLoopbackLogin, setRequireLoopbackLogin]
+}
+
 /** Transient message state (kind drives the color; owner picks the row that shows it). */
-type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' }
+type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' | 'policy' }
 
 /**
  * The settings tab content. Sign-out navigates back to the login page;
@@ -68,6 +90,7 @@ type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'passwor
  */
 export function AuthSection(props: PropsRuntime<'settings.section'>): ReactElement {
   const [username, setUsername] = useUsername()
+  const [requireLoopbackLogin, setRequireLoopbackLogin] = useRequireLoopbackLogin()
   const [newUsername, setNewUsername] = useState('')
   const [usernamePassword, setUsernamePassword] = useState('')
   const [oldPassword, setOldPassword] = useState('')
@@ -124,6 +147,28 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
     }
   }, [oldPassword, newPassword, confirm, flash])
 
+  const toggleLoopbackLogin = useCallback(async (next: boolean) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/auth/policy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ requireLoopbackLogin: next }),
+      })
+      const data = (await res.json()) as { error?: string; requireLoopbackLogin?: boolean }
+      if (res.ok) {
+        setRequireLoopbackLogin(data.requireLoopbackLogin === true)
+        flash({ kind: 'ok', text: next ? '已开启：所有地址都需要登录' : '已关闭：本机访问免登录', owner: 'policy' })
+      } else {
+        flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'policy' })
+      }
+    } catch {
+      flash({ kind: 'error', text: '修改失败，请重试', owner: 'policy' })
+    } finally {
+      setBusy(false)
+    }
+  }, [flash, setRequireLoopbackLogin])
+
   const changeUsername = useCallback(async () => {
     setBusy(true)
     try {
@@ -168,6 +213,27 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 420 }}>
+      <section>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>登录要求</h2>
+        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+          默认关闭（本机免登录）。仅在多人共享服务器、需禁止同机其他账号免登录时打开；打开后本机也需先登录。
+        </p>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={requireLoopbackLogin}
+            disabled={busy}
+            onChange={(event) => void toggleLoopbackLogin(event.target.checked)}
+          />
+          所有地址都需要登录
+        </label>
+        {notice?.owner === 'policy' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
+      </section>
+
       <section>
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>账号</h2>
         <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>

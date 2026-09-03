@@ -18,6 +18,8 @@ import {
   changeUsername,
   getSessionSecret,
   getUsername,
+  getRequireLoopbackLogin,
+  setRequireLoopbackLogin,
   normalizeUsername,
   validateCredentials,
 } from '../src/credential-store.ts'
@@ -1101,5 +1103,93 @@ describe('credential-store changeUsername', () => {
     expect(validateCredentials('alice', 'supersecret1')).toBe(true)
     expect(validateCredentials('admin', 'supersecret1')).toBe(false)
     expect(getSessionSecret()).not.toBe(before)
+  })
+})
+
+// ── loopback-login requirement (PR #17) ───────────────────────────────────────
+
+describe('requireLoopbackLogin', () => {
+  it('trusts loopback by default (flag off)', () => {
+    const { auth } = fakeWebAuthContext('127.0.0.1')
+    expect(auth.authenticate(requestWithCookie())).toBe(true)
+  })
+
+  it('requires a session from loopback once the flag is on', () => {
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const { auth } = fakeWebAuthContext('127.0.0.1')
+    // No cookie: loopback is no longer implicitly trusted.
+    expect(auth.authenticate(requestWithCookie())).toBe(false)
+    // With a valid session cookie: allowed.
+    expect(auth.authenticate(requestWithCookie(sessionCookie('admin')))).toBe(true)
+  })
+
+  it('GET /api/auth/policy reports the current flag', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    let captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/policy').handler(
+      httpRequest({ method: 'GET', ip: '192.0.2.91', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(200)
+    expect(JSON.parse(captured.captured.body)).toEqual({ requireLoopbackLogin: false })
+
+    setRequireLoopbackLogin(true)
+    captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/policy').handler(
+      httpRequest({ method: 'GET', ip: '192.0.2.92', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(JSON.parse(captured.captured.body)).toEqual({ requireLoopbackLogin: true })
+  })
+
+  it('rejects an unauthenticated caller flipping the flag', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/policy', { requireLoopbackLogin: true }, '192.0.2.93')
+    expect(res.statusCode).toBe(401)
+  })
+
+  it('flips the flag for an authenticated caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/policy').handler(
+      jsonRequest('POST', { requireLoopbackLogin: true }, { ip: '192.0.2.94', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(200)
+    expect(getRequireLoopbackLogin()).toBe(true)
+  })
+
+  it('rejects a non-boolean payload', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/policy').handler(
+      jsonRequest('POST', { requireLoopbackLogin: 'yes' }, { ip: '192.0.2.95', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(400)
+  })
+
+  it('refuses to enable before any admin is registered', async () => {
+    const { routes } = fakeWebAuthContext('127.0.0.1')
+    const captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/policy').handler(
+      jsonRequest('POST', { requireLoopbackLogin: true }, { ip: '127.0.0.1', host: '127.0.0.1:3080' }),
+      captured.res,
+    )
+    // No credentials: the loopback caller is trusted, but enabling with no
+    // account to log into must be rejected.
+    expect(captured.captured.statusCode).toBe(400)
+  })
+
+  it('preserves the flag across a password change', () => {
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    changePassword('supersecret1', 'newsecret1')
+    expect(getRequireLoopbackLogin()).toBe(true)
   })
 })
