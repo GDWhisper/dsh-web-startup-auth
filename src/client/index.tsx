@@ -212,6 +212,27 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 420 }}>
       <section>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>登录要求</h2>
+        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+          开启后，任何地址（包括本机）访问都需要登录
+        </p>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={requireLoopbackLogin}
+            disabled={busy}
+            onChange={(event) => void toggleLoopbackLogin(event.target.checked)}
+          />
+          所有地址都需要登录
+        </label>
+        {notice?.owner === 'policy' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
+      </section>
+
+      <section>
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>账号</h2>
         <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
           {username !== undefined ? `当前登录：${username}` : '当前登录：管理员'}
@@ -387,27 +408,6 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
             )}
           </div>
         </form>
-      </section>
-
-      <section>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>登录要求</h2>
-        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
-          开启后，任何地址（包括本机）访问都需要登录
-        </p>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={requireLoopbackLogin}
-            disabled={busy}
-            onChange={(event) => void toggleLoopbackLogin(event.target.checked)}
-          />
-          所有地址都需要登录
-        </label>
-        {notice?.owner === 'policy' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
-            {notice.text}
-          </p>
-        )}
       </section>
     </div>
   )
