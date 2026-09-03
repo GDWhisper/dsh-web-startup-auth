@@ -180,7 +180,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       const data = (await res.json()) as { error?: string; requireLoopbackLogin?: boolean }
       if (res.ok) {
         setRequireLoopbackLogin(data.requireLoopbackLogin === true)
-        flash({ kind: 'ok', text: next ? '已开启：本机访问也需要登录' : '已关闭：本机访问免登录', owner: 'policy' })
+        flash({ kind: 'ok', text: next ? '已开启：所有地址都需要登录' : '已关闭：本机访问免登录', owner: 'policy' })
       } else {
         flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'policy' })
       }
@@ -390,9 +390,9 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       </section>
 
       <section>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>回环访问</h2>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>登录要求</h2>
         <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
-          开启后，本机（localhost）访问也需要登录，与远程地址一视同仁
+          开启后，任何地址（包括本机）访问都需要登录
         </p>
         <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
           <input
@@ -401,7 +401,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
             disabled={busy}
             onChange={(event) => void toggleLoopbackLogin(event.target.checked)}
           />
-          本机访问也需要登录
+          所有地址都需要登录
         </label>
         {notice?.owner === 'policy' && (
           <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>

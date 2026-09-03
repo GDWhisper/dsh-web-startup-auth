@@ -644,7 +644,7 @@ export function apply(ctx: Context, _config: Config): void {
             // Enabling before any admin exists would lock out every caller
             // (loopback included): there would be no account to log into.
             ctx.logger.warn('web-auth: policy update failed: %s', error instanceof Error ? error.message : String(error))
-            jsonResponse(res, 400, { error: '请先注册管理员账号，再开启回环登录要求' })
+            jsonResponse(res, 400, { error: '请先注册管理员账号，再开启强制登录' })
             return
           }
           ctx.logger.info('web-auth: requireLoopbackLogin set to %s (from %s)', requireLoopbackLogin, clientIp(req) ?? 'unknown')
