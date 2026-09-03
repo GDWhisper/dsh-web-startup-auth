@@ -58,9 +58,15 @@ function useUsername(): [string | undefined, (username: string) => void] {
   return [username, setUsername]
 }
 
-/** The switch state shown in the tab (false until the policy fetch resolves). */
-function useRequireLoopbackLogin(): [boolean, (value: boolean) => void] {
-  const [requireLoopbackLogin, setRequireLoopbackLogin] = useState(false)
+/**
+ * Tracks the "本机登录校验" switch shown in the tab. This maps 1:1 to the
+ * backend flag `requireLoopbackLogin` (no inversion): ON = the loopback
+ * address is also required to present a session. OUT OF THE BOX it is OFF
+ * (loopback trusted = 本机免登录); it only flips ON on an explicit admin
+ * action (e.g. a shared multi-user server).
+ */
+function useLoopbackLoginCheck(): [boolean, (value: boolean) => void] {
+  const [loopbackLoginCheck, setLoopbackLoginCheck] = useState(false)
   useEffect(() => {
     let cancelled = false
     void (async () => {
@@ -69,7 +75,7 @@ function useRequireLoopbackLogin(): [boolean, (value: boolean) => void] {
         if (!res.ok) return
         const data = (await res.json()) as { requireLoopbackLogin?: boolean }
         if (!cancelled && typeof data.requireLoopbackLogin === 'boolean') {
-          setRequireLoopbackLogin(data.requireLoopbackLogin)
+          setLoopbackLoginCheck(data.requireLoopbackLogin === true)
         }
       } catch {
         // Policy is best-effort; the tab still renders with the switch off.
@@ -77,7 +83,7 @@ function useRequireLoopbackLogin(): [boolean, (value: boolean) => void] {
     })()
     return () => { cancelled = true }
   }, [])
-  return [requireLoopbackLogin, setRequireLoopbackLogin]
+  return [loopbackLoginCheck, setLoopbackLoginCheck]
 }
 
 /** Transient message state (kind drives the color; owner picks the row that shows it). */
@@ -90,7 +96,7 @@ type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'passwor
  */
 export function AuthSection(props: PropsRuntime<'settings.section'>): ReactElement {
   const [username, setUsername] = useUsername()
-  const [requireLoopbackLogin, setRequireLoopbackLogin] = useRequireLoopbackLogin()
+  const [loopbackLoginCheck, setLoopbackLoginCheck] = useLoopbackLoginCheck()
   const [newUsername, setNewUsername] = useState('')
   const [usernamePassword, setUsernamePassword] = useState('')
   const [oldPassword, setOldPassword] = useState('')
@@ -99,6 +105,8 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<Notice | undefined>(undefined)
   const [confirmingSignOut, setConfirmingSignOut] = useState(false)
+  /** Which edit form (if any) is expanded; both start collapsed. */
+  const [expanded, setExpanded] = useState<null | 'username' | 'password'>(null)
 
   const flash = useCallback((notice: Notice | undefined) => {
     setNotice(notice)
@@ -147,7 +155,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
     }
   }, [oldPassword, newPassword, confirm, flash])
 
-  const toggleLoopbackLogin = useCallback(async (next: boolean) => {
+  const toggleLoopbackLoginCheck = useCallback(async (next: boolean) => {
     setBusy(true)
     try {
       const res = await fetch('/api/auth/policy', {
@@ -157,8 +165,8 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       })
       const data = (await res.json()) as { error?: string; requireLoopbackLogin?: boolean }
       if (res.ok) {
-        setRequireLoopbackLogin(data.requireLoopbackLogin === true)
-        flash({ kind: 'ok', text: next ? '已开启：所有地址都需要登录' : '已关闭：本机访问免登录', owner: 'policy' })
+        setLoopbackLoginCheck(data.requireLoopbackLogin === true)
+        flash({ kind: 'ok', text: next ? '已启用：本机地址将要求登录' : '已关闭：本机访问免登录', owner: 'policy' })
       } else {
         flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'policy' })
       }
@@ -167,7 +175,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
     } finally {
       setBusy(false)
     }
-  }, [flash, setRequireLoopbackLogin])
+  }, [flash, setLoopbackLoginCheck])
 
   const changeUsername = useCallback(async () => {
     setBusy(true)
@@ -210,31 +218,42 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
     cursor: 'pointer',
     border: '1px solid transparent',
   }
+  /** Card wrapper so the four settings blocks read as visually distinct units. */
+  const cardStyle: CSSProperties = {
+    border: '1px solid #e5e5e5',
+    borderRadius: 10,
+    padding: '18px 20px',
+    background: '#ffffff',
+    boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)',
+  }
+  /** Text-button look used to expand/collapse the username / password forms. */
+  const linkStyle: CSSProperties = {
+    background: 'none',
+    border: 'none',
+    color: '#4d6bfe',
+    fontSize: 13,
+    cursor: 'pointer',
+    padding: 0,
+    fontFamily: 'inherit',
+  }
+  /** Accordion chevron drawn as a symmetric SVG so it rotates about its true
+   * visual center (a border-drawn chevron's mass sits at the corner, which
+   * drifts when rotated around the box center). */
+  const Chevron = ({ up }: { up: boolean }): ReactElement => (
+    <svg
+      width={14}
+      height={14}
+      viewBox="0 0 14 14"
+      aria-hidden
+      style={{ transform: up ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease', transformOrigin: 'center' }}
+    >
+      <path d="M3 5 L7 9 L11 5" fill="none" stroke="#333" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 24, maxWidth: 420 }}>
-      <section>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>登录要求</h2>
-        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
-          默认关闭（本机免登录）。仅在多人共享服务器、需禁止同机其他账号免登录时打开；打开后本机也需先登录。
-        </p>
-        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-          <input
-            type="checkbox"
-            checked={requireLoopbackLogin}
-            disabled={busy}
-            onChange={(event) => void toggleLoopbackLogin(event.target.checked)}
-          />
-          所有地址都需要登录
-        </label>
-        {notice?.owner === 'policy' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
-            {notice.text}
-          </p>
-        )}
-      </section>
-
-      <section>
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 460 }}>
+      <section style={cardStyle}>
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>账号</h2>
         <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
           {username !== undefined ? `当前登录：${username}` : '当前登录：管理员'}
@@ -310,106 +329,181 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
         )}
       </section>
 
-      <section>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px' }}>修改用户名</h2>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault()
-            void changeUsername()
-          }}
-          style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-        >
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-            新用户名
-            <input
-              type="text"
-              value={newUsername}
-              onChange={(event) => setNewUsername(event.target.value)}
-              autoComplete="username"
-              style={inputStyle}
-            />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-            当前密码
-            <input
-              type="password"
-              value={usernamePassword}
-              onChange={(event) => setUsernamePassword(event.target.value)}
-              autoComplete="current-password"
-              style={inputStyle}
-            />
-          </label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button
-              type="submit"
-              disabled={busy}
-              style={{ ...buttonStyle, background: '#4d6bfe', color: '#ffffff' }}
-            >
-              修改用户名
-            </button>
-            {notice?.owner === 'username' && (
-              <span style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d' }}>
-                {notice.text}
-              </span>
-            )}
-          </div>
-        </form>
+      <section style={cardStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>修改用户名</h2>
+          <button
+            type="button"
+            onClick={() => setExpanded(expanded === 'username' ? null : 'username')}
+            disabled={busy}
+            aria-label={expanded === 'username' ? '收起' : '修改用户名'}
+            aria-expanded={expanded === 'username'}
+            style={{ ...linkStyle, padding: 12, margin: -12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <Chevron up={expanded === 'username'} />
+          </button>
+        </div>
+        {expanded === 'username' && (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              void changeUsername()
+            }}
+            style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}
+          >
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+              新用户名
+              <input
+                type="text"
+                value={newUsername}
+                onChange={(event) => setNewUsername(event.target.value)}
+                autoComplete="username"
+                style={inputStyle}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+              当前密码
+              <input
+                type="password"
+                value={usernamePassword}
+                onChange={(event) => setUsernamePassword(event.target.value)}
+                autoComplete="current-password"
+                style={inputStyle}
+              />
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <button
+                type="submit"
+                disabled={busy}
+                style={{ ...buttonStyle, background: '#4d6bfe', color: '#ffffff' }}
+              >
+                修改用户名
+              </button>
+            </div>
+          </form>
+        )}
+        {notice?.owner === 'username' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: expanded === 'username' ? '12px 0 0' : '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
       </section>
 
-      <section>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px' }}>修改密码</h2>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault()
-            void changePassword()
-          }}
-          style={{ display: 'flex', flexDirection: 'column', gap: 12 }}
-        >
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-            当前密码
+      <section style={cardStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>修改密码</h2>
+          <button
+            type="button"
+            onClick={() => setExpanded(expanded === 'password' ? null : 'password')}
+            disabled={busy}
+            aria-label={expanded === 'password' ? '收起' : '修改密码'}
+            aria-expanded={expanded === 'password'}
+            style={{ ...linkStyle, padding: 12, margin: -12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+          >
+            <Chevron up={expanded === 'password'} />
+          </button>
+        </div>
+        {expanded === 'password' && (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              void changePassword()
+            }}
+            style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}
+          >
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+              当前密码
+              <input
+                type="password"
+                value={oldPassword}
+                onChange={(event) => setOldPassword(event.target.value)}
+                autoComplete="current-password"
+                style={inputStyle}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+              新密码
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                autoComplete="new-password"
+                style={inputStyle}
+              />
+            </label>
+            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+              确认新密码
+              <input
+                type="password"
+                value={confirm}
+                onChange={(event) => setConfirm(event.target.value)}
+                autoComplete="new-password"
+                style={inputStyle}
+              />
+            </label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <button
+                type="submit"
+                disabled={busy}
+                style={{ ...buttonStyle, background: '#4d6bfe', color: '#ffffff' }}
+              >
+                修改密码
+              </button>
+            </div>
+          </form>
+        )}
+        {notice?.owner === 'password' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: expanded === 'password' ? '12px 0 0' : '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
+      </section>
+
+      <section style={cardStyle}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>登录要求</h2>
+        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+          若启用，本机地址将要求登录，建议在多人共享服务器、需禁止同机其他账号免登录时启用。
+        </p>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+          <span
+            style={{
+              position: 'relative',
+              width: 40,
+              height: 22,
+              borderRadius: 11,
+              background: loopbackLoginCheck ? '#4d6bfe' : '#c4c4c4',
+              transition: 'background 0.2s',
+              flexShrink: 0,
+            }}
+          >
             <input
-              type="password"
-              value={oldPassword}
-              onChange={(event) => setOldPassword(event.target.value)}
-              autoComplete="current-password"
-              style={inputStyle}
-            />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-            新密码
-            <input
-              type="password"
-              value={newPassword}
-              onChange={(event) => setNewPassword(event.target.value)}
-              autoComplete="new-password"
-              style={inputStyle}
-            />
-          </label>
-          <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-            确认新密码
-            <input
-              type="password"
-              value={confirm}
-              onChange={(event) => setConfirm(event.target.value)}
-              autoComplete="new-password"
-              style={inputStyle}
-            />
-          </label>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button
-              type="submit"
+              type="checkbox"
+              checked={loopbackLoginCheck}
               disabled={busy}
-              style={{ ...buttonStyle, background: '#4d6bfe', color: '#ffffff' }}
-            >
-              修改密码
-            </button>
-            {notice?.owner === 'password' && (
-              <span style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d' }}>
-                {notice.text}
-              </span>
-            )}
-          </div>
-        </form>
+              onChange={(event) => void toggleLoopbackLoginCheck(event.target.checked)}
+              style={{ position: 'absolute', inset: 0, margin: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }}
+            />
+            <span
+              style={{
+                position: 'absolute',
+                top: 2,
+                left: loopbackLoginCheck ? 20 : 2,
+                width: 18,
+                height: 18,
+                borderRadius: '50%',
+                background: '#ffffff',
+                transition: 'left 0.2s',
+                boxShadow: '0 1px 2px rgba(0, 0, 0, 0.2)',
+              }}
+            />
+          </span>
+          本机登录校验
+        </label>
+        {notice?.owner === 'policy' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
       </section>
     </div>
   )
