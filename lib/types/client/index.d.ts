@@ -6,7 +6,7 @@
  * existing `/api/auth/*` endpoints served by the node half (`src/auth.ts`);
  * the tab itself performs no RPC, so it depends only on the `slots` service.
  */
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
+import type { Context as ClientContext } from '@deepseek-ai/cordis';
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';
 import type { ReactElement } from 'react';
 /**
@@ -21,6 +21,10 @@ import type { ReactElement } from 'react';
  * layer: cordis activates a fiber as soon as its inject set is ready, and
  * connection is the earliest service in the boot graph, so this apply runs
  * early enough to matter even if the injected hook was ever lost.
+ *
+ * The node half (`src/auth.ts`) performs the actual session boundary:
+ * authorized callers receive the native dsh browser-session cookie, so the
+ * upstream double gate accepts the rest of the page.
  */
 export declare const inject: string[];
 /**

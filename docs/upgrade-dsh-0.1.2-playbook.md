@@ -3,6 +3,9 @@
 > 写给接手本插件的 LLM/开发者。本文基于 harness 源码 tag `dsh-v0.1.2-alpha.1` 的实地核查（2026-08-29），不是猜测。
 > **写作时点**：npm 官方 registry 尚未发布 0.1.2-alpha.1（`@deepseek-ai/dsh` latest/next = 0.1.1-rc.2），本机 dsh 也是 0.1.1-rc.2——**升级前本插件一切正常，本文是预演**。
 > **2026-08-31 更新**：`0.1.2-alpha.2` 已发布，但**只在 `alpha` dist-tag**（registry 上 alpha.1 已撤，`next`/`latest` 仍是 0.1.1-rc.2）。当日做了实机兼容性测试（见文末「2026-08-31 实测记录」），破坏模式与本文预言完全一致；**决策：等 `next` 或 `latest` 推进到 0.1.2 再执行迁移**（裸 `npm i -g @deepseek-ai/dsh` 的用户暂时不会撞上），期间保持 0.1.1-rc.2。
+> **2026-09-03 实施记录（目标 dsh-v0.1.2-rc.1，`/app-alpha`）**：P0 已落地并实机验证——
+> ① `src/auth.ts` 删除 Host/Origin 改写；② 原生 cookie 补签：登录/注册/改密/改用户名响应同时下发 `dsh_sid` 与 `dsh-auth-<authority>`；③ wrapper 对通过认证但缺原生 cookie 的请求**同请求注入**（改 `req.headers.cookie` + Set-Cookie 持久化），升级握手同步注入；④ 客户端包与 `dsh.client.inject` 移除 `dsh-client-runtime`，类型面改用 `@deepseek-ai/cordis` 的 `Context` + `dsh-client-ui-renderer/client`。
+> 实机证据（rc.1 源码 + 本插件 link 的临时 `DSH_HOME`，端口 3091/3092）：注册 200 双 Set-Cookie；回环 `/api/*` 404 + 原生 cookie 同请求注入通过上游双重闸门（401→404）；远程 Host + 有效 `dsh_sid` → 403(`forbidden`，信任围栏按 `trustedHosts` 判定，未配域名属预期) + 按真实 authority 补签；boot 图 47 个 client entry 全部 200、无 `dsh-client-runtime` 引用。剩：`next` 上线后由真实部署重启验证浏览器全链 + 未核查的第三方 channel 回环自检（P1 清单）。
 
 ## 触发条件（什么时候开始做）
 

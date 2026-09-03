@@ -137,10 +137,9 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 
 **路由保护顺序（重要）**：`web-auth` 在 `apply` 里同步包装 `webServer.register` 与 `webServer.registerUpgrade`，所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活。改动 patch 时保持这个注入，否则 API 不设防。
 
-**覆盖范围（所有路由，含事后追溯）**：包装**不只限 `/api` 前缀**——所有经 `webServer.register`/`registerUpgrade` 注册的路由（含第三方插件的非 `/api` channel，如 `/dsh-automation`、技能管理器）都做「认证 + Host/Origin 回环改写」；只有 `/login` 与 `/api/auth/*` 保持匿名。**关键坑**：cordis 的激活顺序**不是 bundle/树顺序**（动态 import 完成顺序不定，实测无论 bundle 怎么排，第三方插件都可能先于 web-auth 激活），所以包装必须在 apply 时**遍历 webserver 路由表（`exact`/`prefixes`/`upgrades` Map）把已注册的路由事后包装**（WeakSet 防重复），再包装未来的注册。只包装 `register` 而不做事后追溯时：先激活插件的路由（技能管理器 `/api/dsh-skills-manager` → `forbidden host`）、非 `/api` channel（`/dsh-automation/snapshot` → 403 `forbidden`）、以及 WebSocket 升级（`/api/events.*` → 403，事件流连不上）都会对远程用户报错。
+**覆盖范围（所有路由，含事后追溯）**：包装**不只限 `/api` 前缀**——所有经 `webServer.register`/`registerUpgrade` 注册的路由（含第三方插件的非 `/api` channel，如 `/dsh-automation`、技能管理器）都做「认证 + 原生浏览器会话 cookie 补签」；只有 `/login` 与 `/api/auth/*` 保持匿名。**关键坑**：cordis 的激活顺序**不是 bundle/树顺序**（动态 import 完成顺序不定，实测无论 bundle 怎么排，第三方插件都可能先于 web-auth 激活），所以包装必须在 apply 时**遍历 webserver 路由表（`exact`/`prefixes`/`upgrades` Map）把已注册的路由事后包装**（WeakSet 防重复），再包装未来的注册。只包装 `register` 而不做事后追溯时：先激活插件的路由（技能管理器 `/api/dsh-skills-manager` → `forbidden host`）、非 `/api` channel（`/dsh-automation/snapshot` → 403 `forbidden`）、以及 WebSocket 升级（`/api/events.*` → 403，事件流连不上）都会对远程用户报错。
 
-**特权 API 回环放行**：harness 的 `packages/client/connection/src/index.ts` 把 `settings.*`、`credentials.*`、`agentPreset.*`、`llm.discoverModels` 等 `PRIVILEGED_METHODS` 限制为**仅回环可访问**（注释原文：`until a real authentication layer exists`）；`rpc-host.ts` 的 `authority: "loopback"` channel（第三方 RPC）同样只认回环 Host。远程访问时这些接口返回 403。`web-auth` 的解法：认证通过后把请求 `Host`/`Origin` 头临时改写为 `127.0.0.1:<port>` 再转发给下游 handler（处理完还原）。**有效会话即认证层，等价于回环信任。**
-**改写条件的踩坑**：早先只在 `bindHost === '0.0.0.0'` 且 Host 非回环时改写，反代部署（绑定 127.0.0.1、`Host` 是公网域名）认证通过后不改写 → 特权 API 仍 403、设置面板打不开。现在条件只看**请求的 authority**（`!isLoopbackAuthority(req.headers.host)`），与绑定地址无关——真实的回环请求本来也不需要改写。
+**上游原生认证双重门禁（dsh 0.1.2+）**：dsh 0.1.2 弃用了 `PRIVILEGED_METHODS` 与 `authority: "loopback"` channel，改为原生 BrowserAuth：`/api` 与首页有双重门禁（信任围栏 + `dsh-auth-<authority>` 原生 cookie），**即使回环请求也无例外**。`web-auth` 在登录/注册/改密/改用户名时用同一份秘密（`client-connection/browser-session` 凭据记录）补签原生 cookie；wrapper 对每个通过认证但未带原生 cookie 的请求，**在同一请求内**把新签的 token 注入 `req.headers.cookie`（并随响应下发 Set-Cookie 持久化），上游门禁即刻放行——必须在请求进入下游 handler 之前完成注入。cookie 名按**请求的真实 authority** 计算（`requestAuthority(req.headers.host)`）；不要改写 Host/Origin——改写会让原生 cookie 名与浏览器地址栏 authority 对不上，造成自伤 401。
 
 **浏览器端 scope gate（rc.8 由前端插件化解，必须早于任何 scope bind）**：DSH 前端 `connection.isLoopback` 由**浏览器地址栏 hostname** 判定（`packages/client/connection/src/client/index.ts:106`），远程浏览器（域名/IP）恒为 false → `SettingsDescribeMirror` 用 memory 模式（`@deepseek-ai/dsh-client-ui-settings/lib/client.js:1340`，`ui-settings/settings-scope.ts:204`）且每个 `SettingsScopeController` 在 `bind()` 时按 `connection.isLoopback` 冻结 persistence（`settings-scope.ts:251`）——host 模式订阅 mirror 并 derive，memory 模式**不订阅不 derive**（`settings-scope.ts:990`）→ `status` 永远 `unavailable` → `PluginCard` 在 `!available` 时返回 null（`ui-settings-plugins/lib/client.js:206`），**整个卡片（header+body）都不渲染**。Models 页也走 `ctx.settingsScope.describe()`（共享 mirror），mirror memory 时 `load()`/`ensure()` 都短路 → Models 页抛 "settings are unavailable in this browser"。
 
@@ -171,7 +170,7 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 | 文件 | 职责 |
 |---|---|
 | `src/startup.ts` | `remote-web-startup` 插件：commander 解析 `--host/--port/--trusted-host`，`provide('webStartup', values)`；`auth-reset` 子命令（`runAuthReset`）；`WEB_STARTUP_SERVICE` 常量 |
-| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password/change-username）、包装 `webServer.register` 做路由保护、`tapIndex` 注入 randomUUID polyfill + 登录重定向、Host/Origin 回环改写、`provide('webAuth')` |
+| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password/change-username）、包装 `webServer.register` 做路由保护、原生浏览器会话 cookie 补签（登录/注册/改密/改用户名 + wrapper 同请求注入）、`tapIndex` 注入 randomUUID polyfill + 登录重定向、`provide('webAuth')` |
 | `src/credential-store.ts` | 凭据持久化：scrypt 散列、`normalizeUsername`（剥 C0+DEL）/ `registerCredentials` / `validateCredentials` / `updateCredentials`（单次写+轮换）/ `resetPassword` / `changePassword` / `changeUsername` / `getUsername` / `signSession` / `verifySession` / `hasCredentials`；`DSH_WEB_AUTH_FILE` 覆盖 |
 | `src/login-page.ts` | 自包含登录/注册页 HTML（黑白蓝风格 + brand wordmark SVG） |
 | `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码 UI），打包为 `lib/client.js` |
@@ -183,7 +182,7 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 
 1. **改 `src/*.ts`（或 `src/client/*.tsx`），然后 `npm run build`**（`lib/` 是唯一被加载的产物：`tsc` 出 node 侧、`tsdown` 出前端 bundle；不构建等于没改）。
 2. 想对照原版行为时看 harness 的 `packages/bundle/web-app/src/startup.ts`（原版 startup 逻辑）。
-3. 涉及认证/信任语义时，对照 `packages/client/connection/src/api-request-trust.ts`（浏览器信任围栏，**明确不是认证层**）和 `packages/client/connection/src/index.ts`（`PRIVILEGED_METHODS` 回环限制）——本插件的「回环放行」是为了绕过后者。
+3. 涉及认证/信任语义时，对照 `packages/client/connection/src/api-request-trust.ts`（浏览器信任围栏，**明确不是认证层**）和 `packages/client/connection/src/browser-auth.ts`（dsh 0.1.2 原生 BrowserAuth：信任围栏 + 原生 cookie 双重门禁）——本插件的「原生 cookie 补签」是为了让认证后的请求通过后者。
 4. 改动 `cordis.patch.yml` 时保持 `connection.inject: [webAuth]`（见「路由保护顺序」），并**保持「包根行」**（`- id: dsh-web-startup-auth / name: dsh-web-startup-auth`，见「设置面板标签页」）——删除它前端插件不会进 boot 图。
 5. 改前端标签页时对照 `ui-settings-models/src/client/index.ts`（slot 注册范本）与 `packages/client/ui-settings/src/client/contract/slots.ts`（`settings.section` 契约）；组件 props 用 `PropsRuntime<'settings.section'>`。
 6. 改完跑测试（见下），**更新 README.md 和本文件的对应段落**。
@@ -241,7 +240,8 @@ dsh web
 - **harness 源码**（dsh 本体）：`/home/pax/coding/research/deepseek-harness`。相关位置：
   - `packages/bundle/web-app/src/startup.ts` — 原版 web-startup（0.0.0.0 拒绝在 ~69 行）
   - `packages/bundle/web-app/src/index.ts` — web-app bundle（webserver 行、`webStartup` 服务消费方）
-  - `packages/client/connection/src/index.ts` — `PRIVILEGED_METHODS` 回环限制（~78 行注释）
+  - `packages/client/connection/src/index.ts` — `/api` 路由与 `requestRejection`（信任围栏 + 原生 cookie）
+  - `packages/client/connection/src/browser-auth.ts` — dsh 0.1.2 原生 BrowserAuth（`?token=` 交换、`dsh-auth-<authority>` cookie）
   - `packages/client/connection/src/api-request-trust.ts` — 浏览器信任围栏（DNS rebinding / 跨站防护）
   - `packages/client/ui-primitives/src/BrandWordmark.tsx` — 登录页品牌字标 SVG 的出处
   - `packages/client/modules/src/index.ts` — `ClientModuleRegistry`（前端插件 boot 图组合、`/plugins/<id>/client.js` 分发、`dsh.client` 扫描）
@@ -261,5 +261,5 @@ dsh web
 - **改源码后必须 `npm run build`**（tsc + tsdown），否则 profile 里跑的还是旧产物；发布前必须保证 `npm pack` 全链路（prepack）通过。
 - 不要为了「省事」改掉 `cordis.patch.yml` 里的 `connection.inject: [webAuth]`——它保证 auth 在 API 路由注册前生效，是安全边界的一部分。
 - 同样不要删 `cordis.patch.yml` 里的**包根行**（`- id: dsh-web-startup-auth / name: dsh-web-startup-auth`）——它是前端插件进 `__DSH_BOOT__` 的前提，删掉后设置面板「认证」标签页消失。
-- 改动认证/信任逻辑时，先读 harness 里对应机制（`PRIVILEGED_METHODS`、`api-request-trust.ts`）再动手，避免破坏「认证即回环信任」的等价性。
+- 改动认证/信任逻辑时，先读 harness 里对应机制（`browser-auth.ts` 原生双重门禁、`api-request-trust.ts` 浏览器信任围栏）再动手，避免破坏「认证即回环信任」的等价性（dsh 0.1.2+ 还需与原生 cookie 补签保持一致）。
 - 登录页品牌元素必须**照搬原版 SVG**（可从 `BrandWordmark.tsx` 提取），不要用 CSS 手绘模拟。

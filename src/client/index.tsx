@@ -7,8 +7,10 @@
  * the tab itself performs no RPC, so it depends only on the `slots` service.
  */
 
-import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
-// Type-only: pulls the shell's SlotMap merge (the 'settings.section' entry).
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+// Type-only: pulls the renderer's `ctx.slots` declaration and the shell's
+// SlotMap merge (the 'settings.section' entry).
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CSSProperties, ReactElement } from 'react'
@@ -26,6 +28,10 @@ import { useCallback, useEffect, useState } from 'react'
  * layer: cordis activates a fiber as soon as its inject set is ready, and
  * connection is the earliest service in the boot graph, so this apply runs
  * early enough to matter even if the injected hook was ever lost.
+ *
+ * The node half (`src/auth.ts`) performs the actual session boundary:
+ * authorized callers receive the native dsh browser-session cookie, so the
+ * upstream double gate accepts the rest of the page.
  */
 export const inject = ['connection']
 

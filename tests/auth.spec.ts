@@ -34,6 +34,9 @@ afterEach(() => {
   rmSync(authDir, { recursive: true, force: true })
 })
 
+/** 32-byte fixture secret mirrored from dsh-client-connection's BrowserAuth record. */
+const BROWSER_SECRET = Buffer.from('0123456789abcdef0123456789abcdef', 'utf8')
+
 /** Fake context that records every registered route for handler-level tests. */
 function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = []) {
   const provided = new Map<string, unknown>()
@@ -66,6 +69,12 @@ function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = []) {
   const ctx = {
     get: (key: string) => {
       if (key === 'webStartup') return { trustedHosts: [] }
+      if (key === 'credentials') return {
+        readRecord: async () => ({
+          kind: 'grant',
+          payload: { version: 1, secret: BROWSER_SECRET.toString('base64url') },
+        }),
+      }
       return undefined
     },
     provide: (key: string, value: unknown) => { provided.set(key, value) },
@@ -118,22 +127,31 @@ function findRoute(routes: WebRoute[], path: string): WebRoute {
 interface CapturedResponse {
   statusCode: number
   body: string
-  setCookie?: string
+  setCookies?: string[]
 }
 
 function jsonResponseCapture() {
   const captured: CapturedResponse = { statusCode: 0, body: '' }
+  const setCookies: string[] = []
   const res = {
+    setHeader: (name: string, value: string | string[]) => {
+      if (name === 'set-cookie') {
+        setCookies.length = 0
+        setCookies.push(...(Array.isArray(value) ? value : [value]))
+      }
+    },
+    getHeader: (name: string) => name === 'set-cookie' ? [...setCookies] : undefined,
     writeHead: (code: number, headers?: Record<string, string | string[]>) => {
       captured.statusCode = code
       if (headers !== undefined) {
         const value = headers['set-cookie']
-        if (Array.isArray(value)) captured.setCookie = value[0]
-        else if (typeof value === 'string') captured.setCookie = value
+        if (Array.isArray(value)) setCookies.push(...value)
+        else if (typeof value === 'string') setCookies.push(value)
       }
     },
     end: (body?: string) => { captured.body = body ?? '' },
   } as unknown as ServerResponse
+  captured.setCookies = setCookies
   return { captured, res }
 }
 
@@ -247,11 +265,13 @@ describe('route wrapping coverage', () => {
   it('retroactively wraps a route registered before web-auth activated', async () => {
     registerCredentials('admin', 'secret1')
     const seenHosts: Array<string | undefined> = []
+    const seenCookies: Array<string> = []
     const thirdParty: WebRoute = {
       kind: 'prefix',
       path: '/api/third-party',
       handler: async (req, res) => {
         seenHosts.push(req.headers.host)
+        seenCookies.push(req.headers.cookie ?? '')
         res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
       },
@@ -259,14 +279,17 @@ describe('route wrapping coverage', () => {
     const { routes } = fakeWebAuthContext('0.0.0.0', [thirdParty])
     const route = findRoute(routes, '/api/third-party')
 
-    // Remote caller + valid session: rewrites Host to loopback.
+    // Remote caller + valid session: preserved Host, co-signed native cookie.
     const ok = jsonResponseCapture()
     await route.handler(
       httpRequest({ host: '192.168.5.216:3080', ip: '192.168.5.216', cookie: sessionCookie('admin') }),
       ok.res,
     )
     expect(ok.captured.statusCode).toBe(200)
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['192.168.5.216:3080'])
+    // Same-request healing: the upstream gate saw the freshly minted token.
+    expect(seenCookies[0]).toContain('dsh-auth-')
+    expect(ok.captured.setCookies?.some((c) => c.startsWith('dsh-auth-'))).toBe(true)
 
     // No session: rejected.
     const rejected = jsonResponseCapture()
@@ -274,10 +297,11 @@ describe('route wrapping coverage', () => {
     expect(rejected.captured.statusCode).toBe(401)
   })
 
-  it('rewrites the authority for a reverse-proxied caller on a loopback bind', async () => {
+  it('preserves the public Host for a reverse-proxied caller on a loopback bind', async () => {
     // dsh bound to 127.0.0.1 behind a proxy: the request arrives from loopback
-    // but carries the public Host, so it needs a session and the same
-    // loopback rewrite to clear dsh's privileged-method fence.
+    // but carries the public Host. Since 0.1.2 the native browser-session
+    // cookie is authority-scoped, so rewriting the Host would destroy the
+    // very cookie the upstream gate checks — the authority must pass through.
     registerCredentials('admin', 'secret1')
     const seenHosts: Array<string | undefined> = []
     const channel: WebRoute = {
@@ -296,7 +320,7 @@ describe('route wrapping coverage', () => {
     const ok = jsonResponseCapture()
     await route.handler(httpRequest({ ...proxied, cookie: sessionCookie('admin') }), ok.res)
     expect(ok.captured.statusCode).toBe(200)
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['dsh.example.com'])
 
     seenHosts.length = 0
     const rejected = jsonResponseCapture()
@@ -327,34 +351,38 @@ describe('route wrapping coverage', () => {
       ok.res,
     )
     expect(ok.captured.statusCode).toBe(200)
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['dsh.example.com:3080'])
   })
 
   it('wraps upgrade routes so WebSocket handshakes pass the trust fence', async () => {
     registerCredentials('admin', 'secret1')
     const seenHosts: Array<string | undefined> = []
+    const seenCookies: Array<string> = []
     const { webServer } = fakeWebAuthContext('0.0.0.0')
     webServer.registerUpgrade({
       path: '/api/events.mux',
       handler: (req) => {
         seenHosts.push((req as IncomingMessage).headers.host)
+        seenCookies.push((req as IncomingMessage).headers.cookie ?? '')
       },
     })
     const upgradeRoute = webServer.upgrades.get('/api/events.mux')
     expect(upgradeRoute).toBeDefined()
 
-    // Remote caller + valid session: rewrites Host to loopback for the fence.
+    // Remote caller + valid session: the authority passes through untouched,
+    // and the native token was injected into the same handshake.
     const socket = { end: () => {} } as unknown as Duplex
-    upgradeRoute!.handler(
+    await upgradeRoute!.handler(
       httpRequest({ host: 'dsh.example.com:3080', ip: '192.0.2.73', cookie: sessionCookie('admin') }),
       socket,
       Buffer.alloc(0),
     )
-    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+    expect(seenHosts).toEqual(['dsh.example.com:3080'])
+    expect(seenCookies[0]).toContain('dsh-auth-')
 
     // No session: refused.
     seenHosts.length = 0
-    upgradeRoute!.handler(
+    await upgradeRoute!.handler(
       httpRequest({ host: 'dsh.example.com:3080', ip: '192.0.2.73' }),
       socket,
       Buffer.alloc(0),
@@ -453,6 +481,14 @@ describe('POST /api/auth/register', () => {
     expect(getUsername()).toBe('draguide')
   })
 
+  it('co-signs the native browser-session cookie for the registering caller', async () => {
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/register', { username: 'admin', password: 'supersecret1' }, '192.0.2.11')
+    expect(res.statusCode).toBe(200)
+    expect(res.setCookies?.[0]).toMatch(/^dsh_sid=/)
+    expect(res.setCookies?.some((c) => c.startsWith('dsh-auth-') && c.includes('HttpOnly'))).toBe(true)
+  })
+
   it('rejects a username that strips to empty', async () => {
     const { routes } = fakeWebAuthContext('0.0.0.0')
     const res = await callEndpoint(routes, '/api/auth/register', { username: '\u0001\u007F', password: 'supersecret1' }, '192.0.2.10')
@@ -491,6 +527,8 @@ describe('POST /api/auth/login', () => {
     }
     const ok = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, ip)
     expect(ok.statusCode).toBe(200)
+    expect(ok.setCookies?.[0]).toMatch(/^dsh_sid=/)
+    expect(ok.setCookies?.some((c) => c.startsWith('dsh-auth-'))).toBe(true)
     const failed = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'wrong-password' }, ip)
     expect(failed.statusCode).toBe(401)
   })
@@ -517,6 +555,22 @@ describe('POST /api/auth/login', () => {
     const { routes } = fakeWebAuthContext('0.0.0.0')
     const ok = await callEndpoint(routes, '/api/auth/login', { username: '\u0001admin\u007F', password: 'supersecret1' }, '192.0.2.24')
     expect(ok.statusCode).toBe(200)
+  })
+})
+
+// ── POST /api/auth/logout: clears both cookie families ───────────────────────
+
+describe('POST /api/auth/logout', () => {
+  it('clears the dsh_sid cookie and the native cookie for the request authority', async () => {
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/logout').handler(
+      jsonRequest('POST', {}, { ip: '192.0.2.60', host: 'dsh.example.com:3080' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(captured.setCookies?.[0]).toMatch(/^dsh_sid=; .*Max-Age=0/)
+    expect(captured.setCookies?.some((c) => c.startsWith('dsh-auth-') && c.includes('Max-Age=0'))).toBe(true)
   })
 })
 
@@ -578,9 +632,11 @@ describe('POST /api/auth/change-password', () => {
     const { auth } = fakeWebAuthContext('0.0.0.0')
     expect(auth.authenticate(requestWithCookie(oldCookie, remote))).toBe(false)
     // The re-issued cookie from the response authenticates the new secret
-    const freshCookie = captured.setCookie?.split(';')[0]
+    const freshCookie = captured.setCookies?.[0].split(';')[0]
     expect(freshCookie).toMatch(/^dsh_sid=/)
     expect(auth.authenticate(requestWithCookie(freshCookie, remote))).toBe(true)
+    // The native browser-session cookie is co-signed for the same authority
+    expect(captured.setCookies?.some((c) => c.startsWith('dsh-auth-'))).toBe(true)
     // New credentials validate
     expect(validateCredentials('admin', 'newsecret1')).toBe(true)
   })
@@ -694,9 +750,11 @@ describe('POST /api/auth/change-username', () => {
     const { auth } = fakeWebAuthContext('0.0.0.0')
     expect(auth.authenticate(requestWithCookie(oldCookie, remote))).toBe(false)
     // The re-issued cookie from the response authenticates the new secret
-    const freshCookie = captured.setCookie?.split(';')[0]
+    const freshCookie = captured.setCookies?.[0].split(';')[0]
     expect(freshCookie).toMatch(/^dsh_sid=/)
     expect(auth.authenticate(requestWithCookie(freshCookie, remote))).toBe(true)
+    // The native browser-session cookie is co-signed for the same authority
+    expect(captured.setCookies?.some((c) => c.startsWith('dsh-auth-'))).toBe(true)
     // The username changed; the password is untouched
     expect(getUsername()).toBe('alice')
     expect(validateCredentials('alice', 'supersecret1')).toBe(true)

@@ -6,6 +6,7 @@
  * - Serve a login/register page at `/login`.
  * - Provide session management (signed cookies, 14-day expiry).
  * - Protect `/api` routes by wrapping the webserver's route registration.
+ * - Co-sign dsh 0.1.2's native browser-session cookie for authorized callers.
  * - Provide a `webAuth` service that downstream transport layers can use.
  *
  * Wire-level enforcement:
@@ -40,6 +41,9 @@ import {
   normalizeUsername,
   MIN_PASSWORD_LENGTH,
 } from './credential-store.ts'
+import { createHash, createHmac } from 'node:crypto'
+import { credentialKey } from '@deepseek-ai/dsh-credentials'
+import type { CredentialProvider, CredentialRecord } from '@deepseek-ai/dsh-credentials'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -73,6 +77,17 @@ const SESSION_COOKIE = 'dsh_sid'
 
 /** Session lifetime in seconds (14 days). */
 const SESSION_MAX_AGE_SEC = 14 * 24 * 60 * 60
+
+// Native dsh browser-session cookie, mirroring BrowserAuth in
+// @deepseek-ai/dsh-client-connection. Since dsh 0.1.2 the upstream /api and
+// index double gate requires this cookie even for loopback, so an authorized
+// caller (valid dsh_sid, or genuine loopback trust) gets it co-signed here.
+const NATIVE_COOKIE_PREFIX = 'dsh-auth-'
+const NATIVE_COOKIE_VERSION = 1
+const NATIVE_SECRET_BYTES = 32
+/** Keep in sync with dsh-client-connection's default `cookieMaxAgeDays`. */
+const NATIVE_COOKIE_MAX_AGE_DAYS = 30
+const NATIVE_RECORD_KEY = credentialKey('client-connection', 'browser-session')
 
 /** Maximum accepted request body, guarding the auth endpoints against memory exhaustion. */
 const MAX_BODY_BYTES = 1024 * 1024
@@ -153,6 +168,128 @@ function sessionCookieSet(value: string): string {
 
 /** Clear the session cookie. */
 const SESSION_CLEAR = `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`
+
+function encodeBase64Url(value: Uint8Array): string {
+  return Buffer.from(value).toString('base64')
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/u, '')
+}
+
+/** Canonical request authority, the native cookie's name and audience. */
+function requestAuthority(host: string | undefined): string | undefined {
+  if (host === undefined) return undefined
+  try {
+    return new URL(`http://${host}`).host
+  } catch {
+    return undefined
+  }
+}
+
+function nativeCookieName(authority: string): string {
+  return NATIVE_COOKIE_PREFIX + encodeBase64Url(createHash('sha256').update(authority).digest())
+}
+
+/** Extract the 32-byte signing secret from the upstream credential record. */
+function nativeSecret(record: CredentialRecord | undefined): Buffer | undefined {
+  if (record === undefined || record.kind !== 'grant' || !isRecord(record.payload)
+    || record.payload.version !== NATIVE_COOKIE_VERSION
+    || typeof record.payload.secret !== 'string') return undefined
+  const secret = Buffer.from(record.payload.secret, 'base64url')
+  return secret.byteLength === NATIVE_SECRET_BYTES ? secret : undefined
+}
+
+/** Read the upstream browser-session secret; absent/unsupported means skip co-signing. */
+async function browserSessionSecret(ctx: Context): Promise<Buffer | undefined> {
+  const credentials = ctx.get('credentials') as CredentialProvider | undefined
+  if (credentials === undefined) return undefined
+  try {
+    return nativeSecret(await credentials.readRecord(NATIVE_RECORD_KEY))
+  } catch (error) {
+    ctx.logger.warn('web-auth: native browser-session secret unavailable: %s',
+      error instanceof Error ? error.message : String(error))
+    return undefined
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Whether the request already carries the native cookie for its authority. */
+function hasNativeCookie(req: IncomingMessage, authority: string | undefined): boolean {
+  if (authority === undefined || req.headers.cookie === undefined) return false
+  return req.headers.cookie.includes(`${nativeCookieName(authority)}=`)
+}
+
+/**
+ * One native browser-session token signed by the upstream secret for this
+ * request's authority. Reused for the Set-Cookie header and for same-request
+ * healing of `req.headers.cookie`.
+ */
+function nativeCookieValue(req: IncomingMessage, secret: Buffer): { name: string; value: string } | undefined {
+  const authority = requestAuthority(req.headers.host)
+  if (authority === undefined) return undefined
+  const issuedAt = Date.now()
+  const expiresAt = issuedAt + NATIVE_COOKIE_MAX_AGE_DAYS * 24 * 60 * 60 * 1000
+  const body = encodeBase64Url(Buffer.from(JSON.stringify({
+    version: NATIVE_COOKIE_VERSION,
+    authority,
+    issuedAt,
+    expiresAt,
+  }), 'utf8'))
+  return {
+    name: nativeCookieName(authority),
+    value: `v1.${body}.${encodeBase64Url(createHmac('sha256', secret).update(body).digest())}`,
+  }
+}
+
+/** Set-Cookie attributes for a freshly issued native token. */
+function nativeCookieHeaderFromToken(token: { name: string; value: string }): string {
+  const maxAgeSeconds = NATIVE_COOKIE_MAX_AGE_DAYS * 24 * 60 * 60
+  return `${token.name}=${token.value}; Max-Age=${maxAgeSeconds}; Path=/; `
+    + `Expires=${new Date(Date.now() + maxAgeSeconds * 1000).toUTCString()}; HttpOnly; SameSite=Strict`
+}
+
+/** One Set-Cookie header minted from the upstream secret for this request's authority. */
+function nativeCookieHeader(req: IncomingMessage, secret: Buffer): string | undefined {
+  const token = nativeCookieValue(req, secret)
+  return token === undefined ? undefined : nativeCookieHeaderFromToken(token)
+}
+
+/** Present a freshly minted native token to the same request (Cookie header) and to the browser (Set-Cookie). */
+function healNativeCookie(req: IncomingMessage, res: ServerResponse, token: { name: string; value: string }): void {
+  const existing = req.headers.cookie
+  req.headers.cookie = existing === undefined || existing === ''
+    ? `${token.name}=${token.value}`
+    : `${existing}; ${token.name}=${token.value}`
+  const existingSet = res.getHeader('set-cookie')
+  const values = existingSet === undefined ? [] : Array.isArray(existingSet) ? existingSet as string[] : [String(existingSet)]
+  res.setHeader('set-cookie', [...values, nativeCookieHeaderFromToken(token)])
+}
+
+/** Client-side deletion of the native cookie (no secret needed). */
+function nativeCookieClearHeader(req: IncomingMessage): string | undefined {
+  const authority = requestAuthority(req.headers.host)
+  if (authority === undefined) return undefined
+  return `${nativeCookieName(authority)}=; Max-Age=0; Path=/; `
+    + `Expires=${new Date(0).toUTCString()}; HttpOnly; SameSite=Strict`
+}
+
+/**
+ * Issue the session cookie plus, when the upstream secret is available, a
+ * native browser-session cookie for this request's authority.
+ * @returns cookie header values, or undefined when session signing failed.
+ */
+async function issueAuthCookies(
+  ctx: Context, req: IncomingMessage, username: string,
+): Promise<string[] | undefined> {
+  const session = buildSessionCookie(username)
+  if (session === undefined) return undefined
+  const secret = await browserSessionSecret(ctx)
+  const native = secret === undefined ? undefined : nativeCookieHeader(req, secret)
+  return [sessionCookieSet(session), native].filter((c): c is string => c !== undefined)
+}
 
 /** Parse the session cookie from a request. */
 function parseSessionCookie(req: IncomingMessage): string | undefined {
@@ -386,13 +523,15 @@ export function apply(ctx: Context, _config: Config): void {
           }
           registerCredentials(username, password)
           ctx.logger.info('web-auth: administrator registered (%s)', username)
-          // Create a session cookie for the newly registered user
-          const cookie = buildSessionCookie(username)
-          if (cookie === undefined) {
+          // Session cookie plus the native browser-session cookie dsh 0.1.2+
+          // requires at the /api and index gates.
+          const cookies = await issueAuthCookies(ctx, req, username)
+          if (cookies === undefined) {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': sessionCookieSet(cookie) })
+          res.setHeader('set-cookie', cookies)
+          res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: true }))
         } catch (error) {
           if (isBodyTooLarge(error)) {
@@ -440,12 +579,13 @@ export function apply(ctx: Context, _config: Config): void {
           }
           recordLoginSuccess(req)
           ctx.logger.info('web-auth: login ok (%s, from %s)', username, clientIp(req) ?? 'unknown')
-          const cookie = buildSessionCookie(username)
-          if (cookie === undefined) {
+          const cookies = await issueAuthCookies(ctx, req, username)
+          if (cookies === undefined) {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': sessionCookieSet(cookie) })
+          res.setHeader('set-cookie', cookies)
+          res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: true }))
         } catch (error) {
           if (isBodyTooLarge(error)) {
@@ -461,7 +601,9 @@ export function apply(ctx: Context, _config: Config): void {
       kind: 'exact',
       path: '/api/auth/logout',
       handler: async (req, res) => {
-        res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': SESSION_CLEAR })
+        const nativeClear = nativeCookieClearHeader(req)
+        res.setHeader('set-cookie', nativeClear === undefined ? [SESSION_CLEAR] : [SESSION_CLEAR, nativeClear])
+        res.writeHead(200, { 'content-type': 'application/json' })
         res.end(JSON.stringify({ ok: true }))
       },
     },
@@ -516,13 +658,15 @@ export function apply(ctx: Context, _config: Config): void {
           recordLoginSuccess(req)
           ctx.logger.info('web-auth: password changed (from %s)', clientIp(req) ?? 'unknown')
           // changePassword rotates the signing secret, invalidating every
-          // previously issued session cookie — re-issue one for this caller.
-          const cookie = buildSessionCookie(username)
-          if (cookie === undefined) {
+          // previously issued session cookie — re-issue one for this caller,
+          // and refresh the native browser-session cookie.
+          const cookies = await issueAuthCookies(ctx, req, username)
+          if (cookies === undefined) {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': sessionCookieSet(cookie) })
+          res.setHeader('set-cookie', cookies)
+          res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: true }))
         } catch (error) {
           if (isBodyTooLarge(error)) {
@@ -587,13 +731,15 @@ export function apply(ctx: Context, _config: Config): void {
           recordLoginSuccess(req)
           ctx.logger.info('web-auth: username changed %s -> %s (from %s)', username, newUsername, clientIp(req) ?? 'unknown')
           // changeUsername rotates the signing secret, invalidating every
-          // previously issued session cookie — re-issue one for this caller.
-          const cookie = buildSessionCookie(newUsername)
-          if (cookie === undefined) {
+          // previously issued session cookie — re-issue one for this caller,
+          // and refresh the native browser-session cookie.
+          const cookies = await issueAuthCookies(ctx, req, newUsername)
+          if (cookies === undefined) {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': sessionCookieSet(cookie) })
+          res.setHeader('set-cookie', cookies)
+          res.writeHead(200, { 'content-type': 'application/json' })
           res.end(JSON.stringify({ ok: true, username: newUsername }))
         } catch (error) {
           if (isBodyTooLarge(error)) {
@@ -645,9 +791,10 @@ export function apply(ctx: Context, _config: Config): void {
   // 'non-loopback', so ui-settings builds its describe mirror in memory mode
   // and every settingsScope.bind() freezes its scope in memory mode - those
   // scopes never derive, so plugin-configuration cards render nothing. The
-  // node half already treats a valid session as loopback-equivalent (see the
-  // Host/Origin rewriting below), so align the browser side here. The
-  // override must land BEFORE the mirror is constructed and any scope binds,
+  // node half already treats a valid session as loopback-equivalent (it
+  // co-signs the native browser-session cookie for authorized callers), so
+  // align the browser side here. The override must land BEFORE the mirror is
+  // constructed and any scope binds,
   // which cannot be guaranteed by our own client plugin's activation order
   // (bundle loads finish out of order). Instead, wrap the module loader so
   // that the connection plugin's apply - the earliest service in the boot
@@ -717,22 +864,11 @@ export function apply(ctx: Context, _config: Config): void {
     return html.replace('</head>', `${script}</head>`)
   })
 
-  // ── 4. Wrap webServer.register / registerUpgrade to protect every route,
-  //       presenting authenticated remote requests as loopback ─────────────
-  // dsh's client-connection gates its privileged /api domains
-  // (settings.*, credentials.*, agentPreset.*, llm.discoverModels, …) and
-  // third-party `authority: "loopback"` RPC channels (/dsh-automation, skill
-  // managers, …) to loopback-origin requests, because the stock deployment
-  // has no authentication layer. A valid session IS that layer, so present
-  // authenticated remote requests as loopback: rewrite the authority headers
-  // for the duration of the downstream handler. Loopback requests pass
-  // through untouched.
-  //
-  // The rewrite is keyed off the requested authority, not the bind host: an
-  // authenticated request also reaches us through a reverse proxy that binds
-  // dsh to loopback and forwards its own public Host, and that caller needs
-  // the same rewrite to clear `PRIVILEGED_METHODS` (which gates on loopback
-  // Host with an empty trustedHosts list).
+  // ── 4. Wrap webServer.register / registerUpgrade to protect every route ─
+  // Every non-public route requires web-auth authorization (valid dsh_sid or
+  // genuine loopback). Since dsh 0.1.2 the upstream /api and index double gate
+  // additionally requires its own native browser-session cookie, so this layer
+  // co-signs one for every authorized caller that lacks it.
   //
   // The wrapper must cover routes registered BEFORE this plugin activated:
   // cordis activation order is not the bundle/tree order (dynamic imports
@@ -741,9 +877,6 @@ export function apply(ctx: Context, _config: Config): void {
   // tables, so wrap them retroactively here.
   const originalRegister = webServer.register.bind(webServer)
   const originalRegisterUpgrade = webServer.registerUpgrade.bind(webServer)
-  // Loopback authority for this server (host:port), used to present
-  // authenticated remote requests as loopback to dsh's own trust fences.
-  const loopbackAuthority = () => `127.0.0.1:${webServer.port}`
   const wrappedHandlers = new WeakSet<WebRoute>()
   const wrappedUpgrades = new WeakSet<WebUpgradeRoute>()
   /** Routes that must stay anonymous: the login page and our own auth API. */
@@ -759,24 +892,14 @@ export function apply(ctx: Context, _config: Config): void {
         jsonResponse(res, 401, { error: 'unauthorized' })
         return
       }
-      if (!isLoopbackAuthority(req.headers.host)) {
-        const originalHost = req.headers.host
-        const originalOrigin = req.headers.origin
-        req.headers.host = loopbackAuthority()
-        if (originalOrigin !== undefined) {
-          req.headers.origin = `http://${loopbackAuthority()}`
-        }
-        try {
-          await originalHandler(req, res)
-        } finally {
-          req.headers.host = originalHost
-          if (originalOrigin !== undefined) {
-            req.headers.origin = originalOrigin
-          } else {
-            delete req.headers.origin
-          }
-        }
-        return
+      // Same-request healing: upstream's native gate reads req.headers.cookie
+      // before any response is written, so present the freshly minted token
+      // there as well as persisting it via Set-Cookie for the browser.
+      const authority = requestAuthority(req.headers.host)
+      if (authority !== undefined && !hasNativeCookie(req, authority)) {
+        const secret = await browserSessionSecret(ctx)
+        const token = secret === undefined ? undefined : nativeCookieValue(req, secret)
+        if (token !== undefined) healNativeCookie(req, res, token)
       }
       await originalHandler(req, res)
     }
@@ -786,27 +909,21 @@ export function apply(ctx: Context, _config: Config): void {
     if (wrappedUpgrades.has(route) || isPublicRoute(route.path)) return
     wrappedUpgrades.add(route)
     const originalHandler = route.handler
-    route.handler = (req, socket, head) => {
+    route.handler = async (req, socket, head) => {
       if (!isAuthorized(req)) {
         socket.end('HTTP/1.1 401 Unauthorized\r\n\r\n')
         return
       }
-      if (!isLoopbackAuthority(req.headers.host)) {
-        const originalHost = req.headers.host
-        const originalOrigin = req.headers.origin
-        req.headers.host = loopbackAuthority()
-        if (originalOrigin !== undefined) {
-          req.headers.origin = `http://${loopbackAuthority()}`
-        }
-        try {
-          return originalHandler(req, socket, head)
-        } finally {
-          req.headers.host = originalHost
-          if (originalOrigin !== undefined) {
-            req.headers.origin = originalOrigin
-          } else {
-            delete req.headers.origin
-          }
+      // WebSocket upgrades carry no response body; heal only the request.
+      const authority = requestAuthority(req.headers.host)
+      if (authority !== undefined && !hasNativeCookie(req, authority)) {
+        const secret = await browserSessionSecret(ctx)
+        const token = secret === undefined ? undefined : nativeCookieValue(req, secret)
+        if (token !== undefined) {
+          const existing = req.headers.cookie
+          req.headers.cookie = existing === undefined || existing === ''
+            ? `${token.name}=${token.value}`
+            : `${existing}; ${token.name}=${token.value}`
         }
       }
       return originalHandler(req, socket, head)

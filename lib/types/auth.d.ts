@@ -6,6 +6,7 @@
  * - Serve a login/register page at `/login`.
  * - Provide session management (signed cookies, 14-day expiry).
  * - Protect `/api` routes by wrapping the webserver's route registration.
+ * - Co-sign dsh 0.1.2's native browser-session cookie for authorized callers.
  * - Provide a `webAuth` service that downstream transport layers can use.
  *
  * Wire-level enforcement:

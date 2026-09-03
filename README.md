@@ -20,7 +20,7 @@
 - **设置面板「认证」标签页**：向 DSH 设置面板注入"认证"页，提供**退出登录**、**修改用户名**与**修改密码**三个操作。
 - **远程场景修复**（局域网 HTTP 访问的两个坑）：
   - `crypto.randomUUID` polyfill —— 非安全上下文下该 API 缺失，会导致所有 RPC 失败。
-  - 特权 API 回环放行 —— DSH 将 `settings.*` / `credentials.*` 等敏感域、`authority: "loopback"` 的第三方 RPC channel（如 `/dsh-automation`、技能管理器）以及 WebSocket 事件流全部限制为仅回环 Host 可访问；认证通过后本插件以回环身份放行（Host/Origin 改写覆盖所有注册路由与升级握手，含先于本插件激活的第三方路由）。
+  - 上游原生浏览器会话 cookie 补签 —— dsh 0.1.2 起 `/api` 与首页有原生 BrowserAuth 双重门禁（`dsh-auth-<authority>` 原生 cookie，回环请求也无例外）；登录/注册/改密/改用户名时补签原生 cookie，wrapper 对通过认证但未带原生 cookie 的请求**在同一请求内**注入新签 token 并以 Set-Cookie 持久化，使上游门禁放行（覆盖所有注册路由与升级握手，含先于本插件激活的第三方路由）。
 
 ## 安装
 
@@ -77,8 +77,8 @@ dsh web --host 0.0.0.0
 - **登录防护**：登录失败按客户端 IP 限速——连续 5 次失败锁定 30 秒（纯内存、无持久化）；注册要求密码至少 8 个字符。限速覆盖 `/api/auth/login`、`/api/auth/change-password` 与 `/api/auth/change-username`（旧密码/当前密码错误同样计次）。如需更严格防护请在反向代理层增加通用限速。
 - **凭据文件权限**：`~/.dsh/web-auth.json`（含密码哈希与会话签名密钥）以 `0600` 保存，目录以 `0700` 创建；插件启动时会自动修复旧版本遗留的过宽权限。
 - **`--trusted-host`**：该参数仅为与原版 CLI 兼容而保留透传，**不参与本插件认证判断**——远程客户端一律需要有效会话，不存在"受信主机免登录"。
-- **反向代理（nginx 等）部署**：可以放心的做法是 dsh 只监听 `127.0.0.1`，由代理做 SSL 卸载并转发。此时**代理必须转发真实 `Host`**（nginx 默认即为 `proxy_set_header Host $host;`，配上 `--trusted-host <域名>` 让 DSH 自身的 Host 围栏放行）；认证通过后插件会把 `Host`/`Origin` 改写成回环再交给下游，特权 API 依旧可用。反之，若代理把 `Host` 写死成 `127.0.0.1`，插件会认为请求来自本机从而**放行全部流量、不做认证**——不要这样配置。`X-Forwarded-For` 不被采信（客户端可伪造），信任判定只看 TCP 对端地址与 `Host`。
-- **上游兼容层（dsh ≥ rc.8）**：dsh rc.8 起，设置面板依赖**前端 settings mirror** 的功能（提供方目录、插件配置表单）在远程浏览器下原本会报 `settings are unavailable in this browser`——DSH 前端用**浏览器地址栏 hostname** 判定是否回环，远程访问恒为非回环，mirror 走内存模式不发 RPC，插件配置卡片整个不渲染。本插件通过 `webServer.tapIndex` 向 SPA 注入脚本：在模块系统就绪后包装每个前端插件的 `apply`，于 connection 插件激活返回的瞬间把 `connection.isLoopback` 覆盖为恒 `true`（配合后端回环放行）——**早于任何 settings scope 的绑定**，因此 mirror 与所有配置 scope 都以 host 模式创建，无需刷新页面。前端插件另保留一份防御性覆盖与 mirror 兜底。该兼容层依赖 dsh 内部结构（`window.__ModuleLoader__`、`settingsScope.mirror`），以 rc.8 为准验证，上游改动可能需要同步更新。
+- **反向代理（nginx 等）部署**：可以放心的做法是 dsh 只监听 `127.0.0.1`，由代理做 SSL 卸载并转发。此时**代理必须转发真实 `Host`**（nginx 默认即为 `proxy_set_header Host $host;`，配上 `--trusted-host <域名>` 让 DSH 自身的 Host 围栏放行）；认证通过后插件按请求的真实 authority 补签上游原生 cookie（cookie 名按 authority 计算，不改写 Host/Origin），特权 API 依旧可用。反之，若代理把 `Host` 写死成 `127.0.0.1`，插件会认为请求来自本机从而**放行全部流量、不做认证**——不要这样配置。`X-Forwarded-For` 不被采信（客户端可伪造），信任判定只看 TCP 对端地址与 `Host`。
+- **上游兼容层（dsh ≥ rc.8）**：dsh rc.8 起，设置面板依赖**前端 settings mirror** 的功能（提供方目录、插件配置表单）在远程浏览器下原本会报 `settings are unavailable in this browser`——DSH 前端用**浏览器地址栏 hostname** 判定是否回环，远程访问恒为非回环，mirror 走内存模式不发 RPC，插件配置卡片整个不渲染。本插件通过 `webServer.tapIndex` 向 SPA 注入脚本：在模块系统就绪后包装每个前端插件的 `apply`，于 connection 插件激活返回的瞬间把 `connection.isLoopback` 覆盖为恒 `true`（配合后端原生 cookie 补签）——**早于任何 settings scope 的绑定**，因此 mirror 与所有配置 scope 都以 host 模式创建，无需刷新页面。前端插件另保留一份防御性覆盖与 mirror 兜底。该兼容层依赖 dsh 内部结构（`window.__ModuleLoader__`、`settingsScope.mirror`），以 rc.8 为准验证，上游改动可能需要同步更新。
 
 ## 开发
 
