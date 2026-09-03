@@ -2,9 +2,10 @@
  * Auth settings tab, browser half.
  *
  * Registers the "认证" section into the settings panel (`settings.section`
- * slot) with two actions: sign out and change password. Both ride the
- * existing `/api/auth/*` endpoints served by the node half (`src/auth.ts`);
- * the tab itself performs no RPC, so it depends only on the `slots` service.
+ * slot) with the account actions (sign out, change username, change
+ * password) and the loopback-login switch. All of them ride the existing
+ * `/api/auth/*` endpoints served by the node half (`src/auth.ts`); the tab
+ * itself performs no RPC, so it depends only on the `slots` service.
  */
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client';
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots';

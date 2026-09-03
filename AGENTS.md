@@ -135,6 +135,12 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 - **`X-Forwarded-For` 不采信**（客户端可伪造）。反代要让其客户端按远程处理，只需转发真实 `Host`（nginx 默认即 `proxy_set_header Host $host;`）；若把 `Host` 写死成回环，本插件就认为请求来自本机并放行——README 的安全说明里明确写了这条配置禁忌。
 - **前端跳转必须与判定一致**：`tapIndex` 注入的首页脚本只在 `!authenticated` 时跳 `/login`。曾经额外要求 `registered`（`!registered || !authenticated`），导致回环模式下未注册时 `authenticated=true` 而首页仍跳 login、login 页又跳回首页的死循环（issue #6）。`authenticated` 语义已含回环信任，前端不要再叠加 `registered` 条件。
 
+**回环豁免开关 `requireLoopbackLogin`**：持久化在 `web-auth.json` 的布尔字段（默认缺省 = 关闭 = 保持回环豁免）。`isTrustedOrigin` 入口处一行短路（开启即恒 false），status / change-password / change-username / 路由包装全部经由它自动翻转语义，无第二条判定路径。要点：
+- **读写**：`credential-store.ts` 的 `getRequireLoopbackLogin` / `setRequireLoopbackLogin`（读-改-写单次写，`updateCredentials` 用 spread 保留该字段）。每次请求直读文件——与凭据查询同模式，无缓存失效问题。
+- **防自锁**：无凭据时禁止开启（`setRequireLoopbackLogin(true)` 抛错，`POST /api/auth/policy` 转 400）——没有可登录的账号时开启会把**所有**访问者（含本机）锁在门外，唯一恢复是 auth-reset。关闭永远允许。
+- **端点**：`GET/POST /api/auth/policy`，单路由按 method 分发；`isPublicRoute` 已豁免 `/api/auth/*` 的包装，所以端点内部自查 `isAuthorized`（与 change-password 同模式）。开启动作不轮换 secret——已登录者（含刚开启的本机管理员）会话保持，无 cookie 的本机浏览器被踢去 `/login`。
+- **影响面**：开启后本机非浏览器客户端（脚本/工具直连 API）同样 401——这是开关本意，README 已注明。
+
 **路由保护顺序（重要）**：`web-auth` 在 `apply` 里同步包装 `webServer.register` 与 `webServer.registerUpgrade`，所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活。改动 patch 时保持这个注入，否则 API 不设防。
 
 **覆盖范围（所有路由，含事后追溯）**：包装**不只限 `/api` 前缀**——所有经 `webServer.register`/`registerUpgrade` 注册的路由（含第三方插件的非 `/api` channel，如 `/dsh-automation`、技能管理器）都做「认证 + Host/Origin 回环改写」；只有 `/login` 与 `/api/auth/*` 保持匿名。**关键坑**：cordis 的激活顺序**不是 bundle/树顺序**（动态 import 完成顺序不定，实测无论 bundle 怎么排，第三方插件都可能先于 web-auth 激活），所以包装必须在 apply 时**遍历 webserver 路由表（`exact`/`prefixes`/`upgrades` Map）把已注册的路由事后包装**（WeakSet 防重复），再包装未来的注册。只包装 `register` 而不做事后追溯时：先激活插件的路由（技能管理器 `/api/dsh-skills-manager` → `forbidden host`）、非 `/api` channel（`/dsh-automation/snapshot` → 403 `forbidden`）、以及 WebSocket 升级（`/api/events.*` → 403，事件流连不上）都会对远程用户报错。
@@ -171,10 +177,10 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 | 文件 | 职责 |
 |---|---|
 | `src/startup.ts` | `remote-web-startup` 插件：commander 解析 `--host/--port/--trusted-host`，`provide('webStartup', values)`；`auth-reset` 子命令（`runAuthReset`）；`WEB_STARTUP_SERVICE` 常量 |
-| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password/change-username）、包装 `webServer.register` 做路由保护、`tapIndex` 注入 randomUUID polyfill + 登录重定向、Host/Origin 回环改写、`provide('webAuth')` |
-| `src/credential-store.ts` | 凭据持久化：scrypt 散列、`normalizeUsername`（剥 C0+DEL）/ `registerCredentials` / `validateCredentials` / `updateCredentials`（单次写+轮换）/ `resetPassword` / `changePassword` / `changeUsername` / `getUsername` / `signSession` / `verifySession` / `hasCredentials`；`DSH_WEB_AUTH_FILE` 覆盖 |
+| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password/change-username/policy）、包装 `webServer.register` 做路由保护、`tapIndex` 注入 randomUUID polyfill + 登录重定向、Host/Origin 回环改写、`provide('webAuth')` |
+| `src/credential-store.ts` | 凭据持久化：scrypt 散列、`normalizeUsername`（剥 C0+DEL）/ `registerCredentials` / `validateCredentials` / `updateCredentials`（单次写+轮换，spread 保留 policy 字段）/ `resetPassword` / `changePassword` / `changeUsername` / `getUsername` / `signSession` / `verifySession` / `hasCredentials` / `getRequireLoopbackLogin` / `setRequireLoopbackLogin`；`DSH_WEB_AUTH_FILE` 覆盖 |
 | `src/login-page.ts` | 自包含登录/注册页 HTML（黑白蓝风格 + brand wordmark SVG） |
-| `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码 UI），打包为 `lib/client.js` |
+| `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码 + 回环登录开关 UI），打包为 `lib/client.js` |
 | `tsdown.config.ts` | 前端插件打包配置（`window.__ModuleLoader__.load` 格式、external 列表） |
 | `src/index.ts` | 仅类型导出（`WebStartupValues`、`AuthConfig`、`WebAuthService`） |
 | `cordis.patch.yml` | bundle patch：禁用 `web-startup`、insert 三个插件（含包根行 `dsh-web-startup-auth`，客户端扫描必需）、`connection` 注入 `webAuth` |
@@ -198,7 +204,7 @@ npm test           # vitest run tests
 npm run build      # tsc，产物到 lib/；tsdown 打包前端 bundle 到 lib/client.js
 ```
 
-- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`/api/auth/status` 的四种判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名）；以及认证端点（register/login/change-password/change-username：用户名净化、限速、密钥轮换、重签会话、旧/当前密码校验、同名 no-op 不轮换）。
+- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`requireLoopbackLogin` 开关（store 默认 false / 持久化 / 未注册禁开 / 开启后回环需会话 + 受保护路由 401 / 关闭恢复）；`GET/POST /api/auth/policy`（未认证 401 / 非布尔 400 / 未注册开启 400 / 写后立即生效）；`/api/auth/status` 的判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名 / 开关开启后回环未登录 authenticated=false）；以及认证端点（register/login/change-password/change-username：用户名净化、限速、密钥轮换、重签会话、旧/当前密码校验、同名 no-op 不轮换）。
 - fake 请求**必须同时给 `socket.remoteAddress` 和 `headers.host`**——信任判定两个都读，缺一个就按远程处理（`requestWithCookie` / `httpRequest` / `jsonRequest` 默认给回环值）。
 - `tests/startup.spec.ts`：验证 `--host 0.0.0.0` 被接受、`webStartup` 服务值、`auth-reset` 子命令（改密/改用户名、密钥轮换、退出码）。
 - 每个测试 `beforeEach` 用 `mkdtempSync` + `DSH_WEB_AUTH_FILE` 隔离凭据文件，`afterEach` 清理。

@@ -27,6 +27,8 @@ interface CredentialFile {
     passwordHash: string;
     /** Random hex used to sign session cookies. */
     secret: string;
+    /** When true, loopback requests need a session like every other address. */
+    requireLoopbackLogin?: boolean;
 }
 /** Hash a password with a salt using scrypt. */
 declare function hashPassword(password: string, salt: string): string;
@@ -87,6 +89,26 @@ export declare function updateCredentials(opts: {
     username?: string;
     password?: string;
 }): void;
+/**
+ * Whether loopback requests must also present a session.
+ *
+ * Defaults to `false` (the historical behavior: a genuine loopback request
+ * is implicitly trusted). Persisted next to the credentials because both
+ * share one threat model and one write path.
+ * @returns the persisted flag; `false` before registration.
+ */
+export declare function getRequireLoopbackLogin(): boolean;
+/**
+ * Persist the loopback-login requirement.
+ *
+ * Refuses to enable the switch before any admin account exists: with no
+ * credentials to log into, requiring sessions everywhere would lock out
+ * every caller — loopback included — with only `auth-reset` as a recovery.
+ * Disabling is always allowed (it re-opens the server).
+ * @param value - the new flag value.
+ * @throws when no credentials exist yet and `value` is `true`.
+ */
+export declare function setRequireLoopbackLogin(value: boolean): void;
 /**
  * Replace the stored password (keeps the username).
  *

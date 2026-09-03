@@ -43,6 +43,8 @@ interface CredentialFile {
   passwordHash: string
   /** Random hex used to sign session cookies. */
   secret: string
+  /** When true, loopback requests need a session like every other address. */
+  requireLoopbackLogin?: boolean
 }
 
 /** Hash a password with a salt using scrypt. */
@@ -159,10 +161,43 @@ export function updateCredentials(opts: { username?: string; password?: string }
     throw new Error('web-auth: no credentials to update')
   }
   writeCredentials({
+    ...creds,
     username: opts.username ?? creds.username,
     passwordHash: opts.password !== undefined ? hashPassword(opts.password, makeSalt()) : creds.passwordHash,
     secret: makeSecret(),
   })
+}
+
+/**
+ * Whether loopback requests must also present a session.
+ *
+ * Defaults to `false` (the historical behavior: a genuine loopback request
+ * is implicitly trusted). Persisted next to the credentials because both
+ * share one threat model and one write path.
+ * @returns the persisted flag; `false` before registration.
+ */
+export function getRequireLoopbackLogin(): boolean {
+  return readCredentials()?.requireLoopbackLogin === true
+}
+
+/**
+ * Persist the loopback-login requirement.
+ *
+ * Refuses to enable the switch before any admin account exists: with no
+ * credentials to log into, requiring sessions everywhere would lock out
+ * every caller — loopback included — with only `auth-reset` as a recovery.
+ * Disabling is always allowed (it re-opens the server).
+ * @param value - the new flag value.
+ * @throws when no credentials exist yet and `value` is `true`.
+ */
+export function setRequireLoopbackLogin(value: boolean): void {
+  const creds = readCredentials()
+  if (creds === undefined) {
+    if (value) throw new Error('web-auth: register an administrator before requiring loopback login')
+    return
+  }
+  if ((creds.requireLoopbackLogin === true) === value) return
+  writeCredentials({ ...creds, requireLoopbackLogin: value })
 }
 
 /**

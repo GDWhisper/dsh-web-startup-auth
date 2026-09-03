@@ -18,6 +18,8 @@ import {
   getUsername,
   normalizeUsername,
   validateCredentials,
+  getRequireLoopbackLogin,
+  setRequireLoopbackLogin,
 } from '../src/credential-store.ts'
 
 let authFile: string
@@ -229,6 +231,85 @@ describe('web-auth service', () => {
   })
 })
 
+// ── requireLoopbackLogin: loopback loses its implicit trust ──────────────────
+
+describe('requireLoopbackLogin trust gating', () => {
+  /** A genuine loopback request: loopback peer address and loopback Host. */
+  const loopback = { ip: '127.0.0.1', host: '127.0.0.1:3080' }
+
+  it('keeps trusting loopback while the switch is off (default)', () => {
+    registerCredentials('admin', 'supersecret1')
+    const { auth } = fakeWebAuthContext('127.0.0.1')
+    expect(auth.authenticate(requestWithCookie(undefined, loopback))).toBe(true)
+  })
+
+  it('requires a session from loopback once enabled', () => {
+    // Given: the switch is on. When: a genuine loopback request with no
+    // cookie. Then: it is treated like any remote caller.
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const { auth } = fakeWebAuthContext('0.0.0.0')
+    expect(auth.authenticate(requestWithCookie(undefined, loopback))).toBe(false)
+  })
+
+  it('accepts a valid session cookie from loopback while enabled', () => {
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const { auth } = fakeWebAuthContext('0.0.0.0')
+    expect(auth.authenticate(requestWithCookie(sessionCookie('admin'), loopback))).toBe(true)
+  })
+
+  it('restores loopback trust after the switch is turned off again', () => {
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    setRequireLoopbackLogin(false)
+    const { auth } = fakeWebAuthContext('127.0.0.1')
+    expect(auth.authenticate(requestWithCookie(undefined, loopback))).toBe(true)
+  })
+
+  it('still lets a sessionless loopback user log in while enabled', async () => {
+    // The recovery path behind the no-self-lockout guarantee: with the
+    // switch on, a loopback browser without a session is bounced to /login,
+    // so the login endpoint itself must keep working and hand out a cookie
+    // that authenticates.
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const { routes, auth } = fakeWebAuthContext('127.0.0.1')
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, '127.0.0.1')
+    expect(res.statusCode).toBe(200)
+    const cookie = res.setCookie?.split(';')[0]
+    expect(cookie).toMatch(/^dsh_sid=/)
+    expect(auth.authenticate(requestWithCookie(cookie))).toBe(true)
+  })
+
+  it('rejects an unauthenticated loopback request on a protected route', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const seenHosts: Array<string | undefined> = []
+    const channel: WebRoute = {
+      kind: 'prefix',
+      path: '/api/third-party',
+      handler: async (req, res) => {
+        seenHosts.push(req.headers.host)
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{}')
+      },
+    }
+    const { routes } = fakeWebAuthContext('127.0.0.1', [channel])
+    const route = findRoute(routes, '/api/third-party')
+    const rejected = jsonResponseCapture()
+    await route.handler(httpRequest(loopback), rejected.res)
+    expect(rejected.captured.statusCode).toBe(401)
+    expect(seenHosts).toEqual([])
+
+    const ok = jsonResponseCapture()
+    await route.handler(httpRequest({ ...loopback, cookie: sessionCookie('admin') }), ok.res)
+    expect(ok.captured.statusCode).toBe(200)
+    // Loopback authority passes through untouched (no Host rewrite needed).
+    expect(seenHosts).toEqual(['127.0.0.1:3080'])
+  })
+})
+
 // ── route wrapping coverage (all routes, retroactive + future) ───────────────
 
 /** A plain GET request with configurable Host and session cookie. */
@@ -404,6 +485,142 @@ describe('GET /api/auth/status', () => {
     registerCredentials('admin', 'supersecret1')
     const status = await readStatus('0.0.0.0', { ...remote, cookie: sessionCookie('admin') })
     expect(status).toEqual({ registered: true, authenticated: true, username: 'admin' })
+  })
+
+  it('reports a loopback browser as unauthenticated once the switch is on', async () => {
+    // Given: requireLoopbackLogin is enabled. When: a genuine loopback
+    // browser asks for status without a session. Then: the SPA's redirect
+    // script sees authenticated=false and sends it to /login.
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const status = await readStatus('127.0.0.1', { ip: '127.0.0.1', host: '127.0.0.1:3080' })
+    expect(status).toEqual({ registered: true, authenticated: false })
+  })
+
+  it('names the session user for a logged-in loopback browser while enabled', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const status = await readStatus('127.0.0.1', {
+      ip: '127.0.0.1',
+      host: '127.0.0.1:3080',
+      cookie: sessionCookie('admin'),
+    })
+    expect(status).toEqual({ registered: true, authenticated: true, username: 'admin' })
+  })
+})
+
+// ── auth policy store: requireLoopbackLogin ──────────────────────────────────
+
+describe('auth policy store', () => {
+  it('defaults to false before registration', () => {
+    // Given: no credential file. When: reading the policy.
+    // Then: loopback exemption stays on (previous behavior).
+    expect(getRequireLoopbackLogin()).toBe(false)
+  })
+
+  it('persists the flag next to the credentials', () => {
+    // Given: a registered admin. When: enabling the switch.
+    // Then: the value survives a re-read from disk.
+    registerCredentials('admin', 'supersecret1')
+    expect(getRequireLoopbackLogin()).toBe(false)
+    setRequireLoopbackLogin(true)
+    expect(getRequireLoopbackLogin()).toBe(true)
+    setRequireLoopbackLogin(false)
+    expect(getRequireLoopbackLogin()).toBe(false)
+  })
+
+  it('keeps the flag across password and username changes', () => {
+    // Given: the switch is on. When: rotating password/username.
+    // Then: the policy is preserved by the single-write credential updates.
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    changePassword('supersecret1', 'newsecret1')
+    expect(getRequireLoopbackLogin()).toBe(true)
+    changeUsername('alice', 'newsecret1')
+    expect(getRequireLoopbackLogin()).toBe(true)
+  })
+
+  it('refuses to enable before any admin is registered', () => {
+    // Given: no credentials exist. When: enabling the switch.
+    // Then: rejected — with no account to log into, every caller
+    // (loopback included) would be locked out of the server entirely.
+    expect(() => setRequireLoopbackLogin(true)).toThrow()
+    expect(getRequireLoopbackLogin()).toBe(false)
+  })
+})
+
+// ── GET/POST /api/auth/policy: the switch endpoint ───────────────────────────
+
+describe('GET/POST /api/auth/policy', () => {
+  /** Call the policy endpoint and capture the response. */
+  async function callPolicy(
+    routes: WebRoute[],
+    method: 'GET' | 'POST' | 'DELETE',
+    body?: unknown,
+    opts: { ip?: string; host?: string; cookie?: string } = {},
+  ): Promise<CapturedResponse> {
+    const { captured, res } = jsonResponseCapture()
+    const req = method === 'GET'
+      ? httpRequest(opts)
+      : jsonRequest(method, body ?? {}, opts)
+    await findRoute(routes, '/api/auth/policy').handler(req, res)
+    return captured
+  }
+
+  it('rejects an unauthenticated remote caller for reads and writes', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    expect((await callPolicy(routes, 'GET', undefined, remote)).statusCode).toBe(401)
+    expect((await callPolicy(routes, 'POST', { requireLoopbackLogin: true }, remote)).statusCode).toBe(401)
+    expect(getRequireLoopbackLogin()).toBe(false)
+  })
+
+  it('reports the current flag to an authenticated caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setRequireLoopbackLogin(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callPolicy(routes, 'GET', undefined, { ...remote, cookie: sessionCookie('admin') })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ requireLoopbackLogin: true })
+  })
+
+  it('rejects a non-boolean value', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('127.0.0.1')
+    expect((await callPolicy(routes, 'POST', { requireLoopbackLogin: 'yes' })).statusCode).toBe(400)
+    expect((await callPolicy(routes, 'POST', {})).statusCode).toBe(400)
+    expect(getRequireLoopbackLogin()).toBe(false)
+  })
+
+  it('refuses to enable before an admin is registered', async () => {
+    const { routes } = fakeWebAuthContext('127.0.0.1')
+    const res = await callPolicy(routes, 'POST', { requireLoopbackLogin: true })
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body).error).toBeTruthy()
+    expect(getRequireLoopbackLogin()).toBe(false)
+  })
+
+  it('applies the new value immediately after a successful write', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes, auth } = fakeWebAuthContext('127.0.0.1')
+    const res = await callPolicy(routes, 'POST', { requireLoopbackLogin: true })
+    expect(res.statusCode).toBe(200)
+    expect(JSON.parse(res.body)).toEqual({ ok: true, requireLoopbackLogin: true })
+    // The very next loopback request without a session is now rejected.
+    expect(auth.authenticate(requestWithCookie())).toBe(false)
+    // ...and the loopback caller still holding a session stays in.
+    expect(auth.authenticate(requestWithCookie(sessionCookie('admin')))).toBe(true)
+  })
+
+  it('answers 405 for other methods', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('127.0.0.1')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/policy').handler(
+      jsonRequest('DELETE', {}, { ip: '127.0.0.1' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(405)
   })
 })
 

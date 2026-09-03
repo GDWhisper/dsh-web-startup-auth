@@ -2,9 +2,10 @@
  * Auth settings tab, browser half.
  *
  * Registers the "认证" section into the settings panel (`settings.section`
- * slot) with two actions: sign out and change password. Both ride the
- * existing `/api/auth/*` endpoints served by the node half (`src/auth.ts`);
- * the tab itself performs no RPC, so it depends only on the `slots` service.
+ * slot) with the account actions (sign out, change username, change
+ * password) and the loopback-login switch. All of them ride the existing
+ * `/api/auth/*` endpoints served by the node half (`src/auth.ts`); the tab
+ * itself performs no RPC, so it depends only on the `slots` service.
  */
 
 import type { ClientContext } from '@deepseek-ai/dsh-client-runtime/client'
@@ -56,7 +57,29 @@ function useUsername(): [string | undefined, (username: string) => void] {
 }
 
 /** Transient message state (kind drives the color; owner picks the row that shows it). */
-type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' }
+type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' | 'policy' }
+
+/** The switch state shown in the tab (false until the policy fetch resolves). */
+function useRequireLoopbackLogin(): [boolean, (value: boolean) => void] {
+  const [requireLoopbackLogin, setRequireLoopbackLogin] = useState(false)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/auth/policy')
+        if (!res.ok) return
+        const data = (await res.json()) as { requireLoopbackLogin?: boolean }
+        if (!cancelled && typeof data.requireLoopbackLogin === 'boolean') {
+          setRequireLoopbackLogin(data.requireLoopbackLogin)
+        }
+      } catch {
+        // Policy is best-effort; the tab still renders with the switch off.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  return [requireLoopbackLogin, setRequireLoopbackLogin]
+}
 
 /**
  * The settings tab content. Sign-out navigates back to the login page;
@@ -65,6 +88,7 @@ type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'passwor
  */
 export function AuthSection(props: PropsRuntime<'settings.section'>): ReactElement {
   const [username, setUsername] = useUsername()
+  const [requireLoopbackLogin, setRequireLoopbackLogin] = useRequireLoopbackLogin()
   const [newUsername, setNewUsername] = useState('')
   const [usernamePassword, setUsernamePassword] = useState('')
   const [oldPassword, setOldPassword] = useState('')
@@ -144,6 +168,28 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       setBusy(false)
     }
   }, [newUsername, usernamePassword, flash, setUsername])
+
+  const toggleLoopbackLogin = useCallback(async (next: boolean) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/auth/policy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ requireLoopbackLogin: next }),
+      })
+      const data = (await res.json()) as { error?: string; requireLoopbackLogin?: boolean }
+      if (res.ok) {
+        setRequireLoopbackLogin(data.requireLoopbackLogin === true)
+        flash({ kind: 'ok', text: next ? '已开启：本机访问也需要登录' : '已关闭：本机访问免登录', owner: 'policy' })
+      } else {
+        flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'policy' })
+      }
+    } catch {
+      flash({ kind: 'error', text: '修改失败，请重试', owner: 'policy' })
+    } finally {
+      setBusy(false)
+    }
+  }, [flash, setRequireLoopbackLogin])
 
   const inputStyle: CSSProperties = {
     width: '100%',
@@ -341,6 +387,27 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
             )}
           </div>
         </form>
+      </section>
+
+      <section>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>回环访问</h2>
+        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+          开启后，本机（localhost）访问也需要登录，与远程地址一视同仁
+        </p>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+          <input
+            type="checkbox"
+            checked={requireLoopbackLogin}
+            disabled={busy}
+            onChange={(event) => void toggleLoopbackLogin(event.target.checked)}
+          />
+          本机访问也需要登录
+        </label>
+        {notice?.owner === 'policy' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
       </section>
     </div>
   )
