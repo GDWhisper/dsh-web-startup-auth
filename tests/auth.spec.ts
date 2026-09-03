@@ -671,6 +671,36 @@ describe('index fallback seat wrapping', () => {
     expect(served.captured.statusCode).toBe(200)
     expect(served.captured.body).toBe('<html>index</html>')
   })
+
+  it('serves static dist assets anonymously but keeps the index guarded', async () => {
+    registerCredentials('admin', 'secret1')
+    const staticFallback: WebRoute['handler'] = async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'image/svg+xml' })
+      res.end('<svg></svg>')
+    }
+    const { webServer } = fakeWebAuthContext('0.0.0.0', [], fakeCredentials(), staticFallback)
+    const fallback = webServer.fallback
+    expect(fallback).toBeDefined()
+
+    // The login page references /favicon.svg; an anonymous 401 there would
+    // render a broken image. Static dist assets stay public.
+    const served = jsonResponseCapture()
+    await fallback!(
+      httpRequest({ url: '/favicon.svg', host: 'dsh.example.com', ip: '192.0.2.89' }),
+      served.res,
+    )
+    expect(served.captured.statusCode).toBe(200)
+    expect(served.captured.body).toBe('<svg></svg>')
+
+    // The SPA index (both entry paths) is still session-guarded.
+    const index = jsonResponseCapture()
+    await fallback!(
+      httpRequest({ url: '/index.html', host: 'dsh.example.com', ip: '192.0.2.90', accept: 'text/html' }),
+      index.res,
+    )
+    expect(index.captured.statusCode).toBe(302)
+    expect(index.captured.location).toBe('/login')
+  })
 })
 
 // ── GET /api/auth/status: the front end redirects on its verdict ─────────────

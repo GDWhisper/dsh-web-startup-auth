@@ -946,10 +946,33 @@ export function apply(ctx: Context, _config: Config): void {
       await handler(req, res)
     }
 
+  /**
+   * Wrap the fallback seat (frontend-static): it serves the whole dist —
+   * the SPA index AND the static assets next to it. Only the index paths
+   * stay guarded; every other fallback path is a public build artifact
+   * (favicon.svg, bundled JS/CSS/...), and the login page itself references
+   * `/favicon.svg`, which would render as a broken image behind a 401.
+   * Unparseable request targets keep the full guard.
+   */
   const wrapFallback = (handler: WebRoute['handler']): WebRoute['handler'] => {
     if (wrappedFallbacks.has(handler)) return handler
     wrappedFallbacks.add(handler)
-    return protect(handler)
+    const guarded = protect(handler)
+    return async (req, res) => {
+      let pathname: string
+      try {
+        pathname = new URL(req.url ?? '/', 'http://x').pathname
+      } catch {
+        await guarded(req, res)
+        return
+      }
+      if ((req.method === 'GET' || req.method === 'HEAD') &&
+          pathname !== '/' && pathname !== '/index.html') {
+        await handler(req, res)
+        return
+      }
+      await guarded(req, res)
+    }
   }
 
   const wrapHandler = (route: WebRoute): void => {
