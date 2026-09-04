@@ -261,6 +261,7 @@ dsh web
 
 ## 约定（本项目内）
 
+- **发版按 `docs/release-guide.md` 执行**（检查→验证→bump→推送→tag→notes→确认 Actions）。Release notes 面向用户：每条一行带短提交号，只写「新增了什么/修复了什么」，不写实现细节；结构参照上一版，中英双语。
 - **版本跟进基线**：README 声明跟进官方 `next` dist-tag（不跟 `alpha`）。当前基线 dsh 0.1.2-rc.1（迁移执行中/已完成见 `docs/upgrade-dsh-0.1.2-playbook.md`）；上游再出 `next` 新版本时按该手册「观察哨」核对（先 diff `browser-auth.ts`）。
 - 文件：`src/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见「依赖更新（Renovate 机器人）」）、`README.md`（用户文档）。
 - **改源码后必须 `npm run build`**（tsc + tsdown），否则 profile 里跑的还是旧产物；发布前必须保证 `npm pack` 全链路（prepack）通过。
