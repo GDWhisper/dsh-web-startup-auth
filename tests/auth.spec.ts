@@ -20,6 +20,8 @@ import {
   getUsername,
   getRequireLoopbackLogin,
   setRequireLoopbackLogin,
+  getSessionMaxAgeDays,
+  setSessionMaxAgeDays,
   normalizeUsername,
   validateCredentials,
 } from '../src/credential-store.ts'
@@ -1193,3 +1195,116 @@ describe('requireLoopbackLogin', () => {
     expect(getRequireLoopbackLogin()).toBe(true)
   })
 })
+
+// ── session lifetime (settings-tab "会话有效期") ─────────────────────────────
+
+describe('session max age', () => {
+  it('defaults to 14 days before and after registration', () => {
+    expect(getSessionMaxAgeDays()).toBe(14)
+    registerCredentials('admin', 'supersecret1')
+    expect(getSessionMaxAgeDays()).toBe(14)
+  })
+
+  it('GET /api/auth/session-max-age reports the configured days', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    let captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/session-max-age').handler(
+      httpRequest({ method: 'GET', ip: '192.0.2.96', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(200)
+    expect(JSON.parse(captured.captured.body)).toEqual({ days: 14 })
+
+    setSessionMaxAgeDays(90)
+    captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/session-max-age').handler(
+      httpRequest({ method: 'GET', ip: '192.0.2.97', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(JSON.parse(captured.captured.body)).toEqual({ days: 90 })
+  })
+
+  it('persists the selected days for an authenticated caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/session-max-age').handler(
+      jsonRequest('POST', { days: 30 }, { ip: '192.0.2.98', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(200)
+    expect(JSON.parse(captured.captured.body)).toEqual({ ok: true, days: 30 })
+    expect(getSessionMaxAgeDays()).toBe(30)
+  })
+
+  it('is a no-op when the value is unchanged', () => {
+    registerCredentials('admin', 'supersecret1')
+    const before = getSessionSecret()
+    setSessionMaxAgeDays(14)
+    expect(getSessionMaxAgeDays()).toBe(14)
+    // Unchanged value must not rewrite the file (and never rotates the secret).
+    expect(getSessionSecret()).toBe(before)
+  })
+
+  it('rejects a value outside the selectable choices', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    for (const days of [10, -1, 0, '30', 30.5]) {
+      const captured = jsonResponseCapture()
+      await findRoute(routes, '/api/auth/session-max-age').handler(
+        jsonRequest('POST', { days }, { ip: '192.0.2.99', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+        captured.res,
+      )
+      expect(captured.captured.statusCode).toBe(400)
+    }
+    expect(getSessionMaxAgeDays()).toBe(14)
+  })
+
+  it('rejects an unauthenticated caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/session-max-age', { days: 30 }, '192.0.2.100')
+    expect(res.statusCode).toBe(401)
+    expect(getSessionMaxAgeDays()).toBe(14)
+  })
+
+  it('refuses to change before any admin is registered', async () => {
+    const { routes } = fakeWebAuthContext('127.0.0.1')
+    const captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/session-max-age').handler(
+      jsonRequest('POST', { days: 30 }, { ip: '127.0.0.1', host: '127.0.0.1:3080' }),
+      captured.res,
+    )
+    // No credentials: the loopback caller is trusted, but there is no session
+    // store yet to attach a lifetime to.
+    expect(captured.captured.statusCode).toBe(400)
+  })
+
+  it('never rotates the session secret (existing sessions keep their lifetime)', () => {
+    registerCredentials('admin', 'supersecret1')
+    const before = getSessionSecret()
+    setSessionMaxAgeDays(180)
+    expect(getSessionSecret()).toBe(before)
+  })
+
+  it('preserves the value across a password change', () => {
+    registerCredentials('admin', 'supersecret1')
+    setSessionMaxAgeDays(60)
+    changePassword('supersecret1', 'newsecret1')
+    expect(getSessionMaxAgeDays()).toBe(60)
+  })
+
+  it('issues login cookies whose Max-Age reflects the configured days', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSessionMaxAgeDays(3)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, '192.0.2.101')
+    expect(captured.statusCode).toBe(200)
+    const sessionCookieHeader = captured.setCookies?.find((value) => value.startsWith('dsh_sid='))
+    expect(sessionCookieHeader).toBeDefined()
+    // 3 days = 259200 seconds.
+    expect(sessionCookieHeader).toContain('Max-Age=259200')
+  })
+})
+

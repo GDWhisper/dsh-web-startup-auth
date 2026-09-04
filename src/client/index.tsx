@@ -13,6 +13,8 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CSSProperties, ReactElement } from 'react'
 import { useCallback, useEffect, useState } from 'react'
+// Inlined by tsdown (dependency-free constants module shared with the node half).
+import { DEFAULT_SESSION_MAX_AGE_DAYS, SESSION_MAX_AGE_CHOICES } from '../session-limits.ts'
 
 /**
  * Service required before the section can be registered. The settings
@@ -86,8 +88,35 @@ function useLoopbackLoginCheck(): [boolean, (value: boolean) => void] {
   return [loopbackLoginCheck, setLoopbackLoginCheck]
 }
 
+/**
+ * Tracks the "会话有效期" selection shown in the tab. Maps to the persisted
+ * `sessionMaxAgeDays` (see session-limits.ts for the selectable choices);
+ * OUT OF THE BOX it is the 14-day default. Changing it only affects freshly
+ * issued sessions — existing cookies keep the expiry baked in at sign time.
+ */
+function useSessionMaxAge(): [number, (days: number) => void] {
+  const [days, setDays] = useState(DEFAULT_SESSION_MAX_AGE_DAYS)
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await fetch('/api/auth/session-max-age')
+        if (!res.ok) return
+        const data = (await res.json()) as { days?: number }
+        if (!cancelled && typeof data.days === 'number') {
+          setDays(data.days)
+        }
+      } catch {
+        // Best-effort; the tab still renders with the default selection.
+      }
+    })()
+    return () => { cancelled = true }
+  }, [])
+  return [days, setDays]
+}
+
 /** Transient message state (kind drives the color; owner picks the row that shows it). */
-type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' | 'policy' }
+type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' | 'policy' | 'sessionMaxAge' }
 
 /**
  * The settings tab content. Sign-out navigates back to the login page;
@@ -97,6 +126,7 @@ type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'passwor
 export function AuthSection(props: PropsRuntime<'settings.section'>): ReactElement {
   const [username, setUsername] = useUsername()
   const [loopbackLoginCheck, setLoopbackLoginCheck] = useLoopbackLoginCheck()
+  const [sessionMaxAgeDays, setSessionMaxAgeDays] = useSessionMaxAge()
   const [newUsername, setNewUsername] = useState('')
   const [usernamePassword, setUsernamePassword] = useState('')
   const [oldPassword, setOldPassword] = useState('')
@@ -176,6 +206,30 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       setBusy(false)
     }
   }, [flash, setLoopbackLoginCheck])
+
+  /** Persists the selected session lifetime immediately on change (mirrors
+   * the policy toggle: load via hook, save on interaction, flash the outcome). */
+  const saveSessionMaxAge = useCallback(async (next: number) => {
+    setBusy(true)
+    try {
+      const res = await fetch('/api/auth/session-max-age', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ days: next }),
+      })
+      const data = (await res.json()) as { error?: string; days?: number }
+      if (res.ok) {
+        if (typeof data.days === 'number') setSessionMaxAgeDays(data.days)
+        flash({ kind: 'ok', text: `已保存：会话有效期 ${next} 天（对新登录的会话生效）`, owner: 'sessionMaxAge' })
+      } else {
+        flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'sessionMaxAge' })
+      }
+    } catch {
+      flash({ kind: 'error', text: '修改失败，请重试', owner: 'sessionMaxAge' })
+    } finally {
+      setBusy(false)
+    }
+  }, [flash, setSessionMaxAgeDays])
 
   const changeUsername = useCallback(async () => {
     setBusy(true)
@@ -500,6 +554,31 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
           本机登录校验
         </label>
         {notice?.owner === 'policy' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
+      </section>
+
+      <section style={cardStyle}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>会话有效期</h2>
+        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+          登录后会话 cookie 的有效天数。调整后对新登录的会话生效，已登录的会话不受影响。
+        </p>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+          有效期
+          <select
+            value={sessionMaxAgeDays}
+            disabled={busy}
+            onChange={(event) => void saveSessionMaxAge(Number(event.target.value))}
+            style={{ ...inputStyle, width: 'auto' }}
+          >
+            {SESSION_MAX_AGE_CHOICES.map((days) => (
+              <option key={days} value={days}>{days} 天</option>
+            ))}
+          </select>
+        </label>
+        {notice?.owner === 'sessionMaxAge' && (
           <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
             {notice.text}
           </p>

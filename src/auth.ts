@@ -4,7 +4,7 @@
  * Responsibilities:
  * - Refuse to start with `--host 0.0.0.0` unless credentials can be managed.
  * - Serve a login/register page at `/login`.
- * - Provide session management (signed cookies, 14-day expiry).
+ * - Provide session management (signed cookies; expiry configurable in the settings tab, default 14 days).
  * - Protect every registered route by wrapping the webserver's registration.
  * - Bridge dsh 0.1.2's native browser authentication: mint the native
  *   `dsh-auth-*` cookie for callers our session layer already trusts, so a
@@ -36,6 +36,7 @@ import { createHash, createHmac } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
+import { isValidSessionMaxAgeDays, SESSION_MAX_AGE_CHOICES } from './session-limits.ts'
 import { WEB_STARTUP_SERVICE } from './startup.ts'
 import { LOGIN_PAGE_HTML } from './login-page.ts'
 import {
@@ -50,6 +51,8 @@ import {
   getUsername,
   getRequireLoopbackLogin,
   setRequireLoopbackLogin,
+  getSessionMaxAgeDays,
+  setSessionMaxAgeDays,
   normalizeUsername,
   MIN_PASSWORD_LENGTH,
 } from './credential-store.ts'
@@ -84,8 +87,13 @@ export interface WebAuthService {
 /** Session cookie name. */
 const SESSION_COOKIE = 'dsh_sid'
 
-/** Session lifetime in seconds (14 days). */
-const SESSION_MAX_AGE_SEC = 14 * 24 * 60 * 60
+/** Seconds per day (session lifetimes are configured in whole days). */
+const SECS_PER_DAY = 24 * 60 * 60
+
+/** Session lifetime in seconds, as configured in the settings tab (default 14 days). */
+function getSessionMaxAgeSec(): number {
+  return getSessionMaxAgeDays() * SECS_PER_DAY
+}
 
 /** Maximum accepted request body, guarding the auth endpoints against memory exhaustion. */
 const MAX_BODY_BYTES = 1024 * 1024
@@ -159,9 +167,9 @@ function pruneLoginFailures(now = Date.now()): void {
   }
 }
 
-/** Cookie header string for a session cookie with 14-day expiry. */
+/** Cookie header string for a session cookie with the configured expiry. */
 function sessionCookieSet(value: string): string {
-  return `${SESSION_COOKIE}=${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_MAX_AGE_SEC}`
+  return `${SESSION_COOKIE}=${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${getSessionMaxAgeSec()}`
 }
 
 /** Clear the session cookie. */
@@ -181,7 +189,7 @@ function parseSessionCookie(req: IncomingMessage): string | undefined {
 
 /** Build a session payload (username + expiry) and sign it. */
 function buildSessionCookie(username: string): string | undefined {
-  const exp = Math.floor(Date.now() / 1000) + SESSION_MAX_AGE_SEC
+  const exp = Math.floor(Date.now() / 1000) + getSessionMaxAgeSec()
   const payload = JSON.stringify({ u: username, e: exp })
   const sig = signSession(payload)
   if (sig === undefined) return undefined
@@ -856,6 +864,56 @@ export function apply(ctx: Context, _config: Config): void {
             return
           }
           ctx.logger.warn('web-auth: policy endpoint failed: %s', error instanceof Error ? error.message : String(error))
+          jsonResponse(res, 500, { error: '服务器内部错误' })
+        }
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/auth/session-max-age',
+      handler: async (req, res) => {
+        // Reading and changing the session lifetime requires an authenticated
+        // caller, mirroring the policy endpoint: a session cookie for a
+        // remote caller, or the implicit trust of a genuine loopback request.
+        // Changing the value only affects freshly issued cookies — existing
+        // sessions keep the lifetime baked into their payload at sign time.
+        try {
+          if (!isAuthorized(req)) {
+            jsonResponse(res, 401, { error: '未登录或会话已过期' })
+            return
+          }
+          if (req.method === 'GET') {
+            jsonResponse(res, 200, { days: getSessionMaxAgeDays() })
+            return
+          }
+          if (req.method !== 'POST') {
+            res.writeHead(405)
+            res.end()
+            return
+          }
+          const body = await parseBody(req)
+          const days = body.days
+          if (!isValidSessionMaxAgeDays(days)) {
+            jsonResponse(res, 400, { error: `days 必须是 ${SESSION_MAX_AGE_CHOICES.join('/')} 之一` })
+            return
+          }
+          try {
+            setSessionMaxAgeDays(days)
+          } catch (error) {
+            // Thrown before any admin exists: there would be no session to
+            // apply a lifetime to, and no authenticated caller either.
+            ctx.logger.warn('web-auth: session lifetime update failed: %s', error instanceof Error ? error.message : String(error))
+            jsonResponse(res, 400, { error: '请先注册管理员账号，再调整会话有效期' })
+            return
+          }
+          ctx.logger.info('web-auth: session lifetime set to %s days (from %s)', days, clientIp(req) ?? 'unknown')
+          jsonResponse(res, 200, { ok: true, days })
+        } catch (error) {
+          if (isBodyTooLarge(error)) {
+            jsonResponse(res, 413, { error: '请求体过大' })
+            return
+          }
+          ctx.logger.warn('web-auth: session-max-age endpoint failed: %s', error instanceof Error ? error.message : String(error))
           jsonResponse(res, 500, { error: '服务器内部错误' })
         }
       },

@@ -29,6 +29,8 @@ interface CredentialFile {
     secret: string;
     /** When true, loopback requests need a session like every other address. */
     requireLoopbackLogin?: boolean;
+    /** Admin-selected session lifetime in days (see session-limits.ts). */
+    sessionMaxAgeDays?: number;
 }
 /** Hash a password with a salt using scrypt. */
 declare function hashPassword(password: string, salt: string): string;
@@ -109,6 +111,24 @@ export declare function getRequireLoopbackLogin(): boolean;
  * @throws when no credentials exist yet and `value` is `true`.
  */
 export declare function setRequireLoopbackLogin(value: boolean): void;
+/**
+ * The configured session lifetime, in days.
+ *
+ * Persisted next to the credentials because both share one write path.
+ * Changing it only affects freshly issued cookies: the expiry is baked into
+ * each session payload at signing time, so existing sessions keep their
+ * original lifetime (unlike password changes, this never rotates the secret).
+ * @returns the persisted lifetime; the default before registration or when
+ * the stored value is not one of the selectable choices.
+ */
+export declare function getSessionMaxAgeDays(): number;
+/**
+ * Persist the session lifetime.
+ * @param days - the new lifetime in days (must be a selectable choice).
+ * @throws when `days` is not one of the selectable choices, or when no
+ * credentials exist yet.
+ */
+export declare function setSessionMaxAgeDays(days: number): void;
 /**
  * Replace the stored password (keeps the username).
  *

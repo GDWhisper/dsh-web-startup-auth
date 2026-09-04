@@ -4,7 +4,7 @@
  * Responsibilities:
  * - Refuse to start with `--host 0.0.0.0` unless credentials can be managed.
  * - Serve a login/register page at `/login`.
- * - Provide session management (signed cookies, 14-day expiry).
+ * - Provide session management (signed cookies; expiry configurable in the settings tab, default 14 days).
  * - Protect every registered route by wrapping the webserver's registration.
  * - Bridge dsh 0.1.2's native browser authentication: mint the native
  *   `dsh-auth-*` cookie for callers our session layer already trusts, so a
