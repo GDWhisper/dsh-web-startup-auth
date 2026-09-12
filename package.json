@@ -49,7 +49,7 @@
     "react": "^18.2.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-client-ui-settings": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-settings": "^0.1.5-rc.2",
     "@deepseek-ai/dsh-client-ui-slots": "^0.1.5-rc.1",
     "@types/node": "^24.13.4",
     "@types/react": "^18.3.1",
