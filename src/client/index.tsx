@@ -324,14 +324,19 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
     }
   }, [newUsername, usernamePassword, flash, setUsername])
 
+  /** Colors use the shell's theme tokens (ui-theme design-platform.css), which
+   * flip via body[data-ds-dark-theme]; the literals are light fallbacks for
+   * compositions where the theme stylesheet is absent. */
   const inputStyle: CSSProperties = {
     width: '100%',
     boxSizing: 'border-box',
     padding: '8px 10px',
-    border: '1px solid #d9d9d9',
+    border: '1px solid var(--dsw-alias-border-l2, #d9d9d9)',
     borderRadius: 6,
     fontSize: 14,
     fontFamily: 'inherit',
+    background: 'var(--dsw-specific-input-major, #ffffff)',
+    color: 'var(--dsw-alias-label-primary, #333)',
   }
   const buttonStyle: CSSProperties = {
     padding: '8px 16px',
@@ -343,17 +348,17 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
   }
   /** Card wrapper so the four settings blocks read as visually distinct units. */
   const cardStyle: CSSProperties = {
-    border: '1px solid #e5e5e5',
+    border: '1px solid var(--dsw-alias-border-l2, #e5e5e5)',
     borderRadius: 10,
     padding: '18px 20px',
-    background: '#ffffff',
+    background: 'var(--dsw-alias-bg-layer-1, #ffffff)',
     boxShadow: '0 1px 2px rgba(0, 0, 0, 0.04)',
   }
   /** Text-button look used to expand/collapse the username / password forms. */
   const linkStyle: CSSProperties = {
     background: 'none',
     border: 'none',
-    color: '#4d6bfe',
+    color: 'var(--dsw-alias-button-info-fill, #4d6bfe)',
     fontSize: 13,
     cursor: 'pointer',
     padding: 0,
@@ -368,17 +373,17 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       height={14}
       viewBox="0 0 14 14"
       aria-hidden
-      style={{ transform: up ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease', transformOrigin: 'center' }}
+      style={{ color: 'var(--dsw-alias-label-secondary, #333)', transform: up ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease', transformOrigin: 'center' }}
     >
-      <path d="M3 5 L7 9 L11 5" fill="none" stroke="#333" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M3 5 L7 9 L11 5" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   )
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 460 }}>
       <section style={cardStyle}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>账号</h2>
-        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>账号</h2>
+        <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
           {username !== undefined ? `当前登录：${username}` : '当前登录：管理员'}
         </p>
         <div style={{ position: 'relative', display: 'inline-block' }}>
@@ -386,7 +391,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
             type="button"
             onClick={() => setConfirmingSignOut(true)}
             disabled={busy}
-            style={{ ...buttonStyle, background: 'none', borderColor: '#d4380d', color: '#d4380d' }}
+            style={{ ...buttonStyle, background: 'none', borderColor: 'var(--dsw-alias-state-error-primary, #d4380d)', color: 'var(--dsw-alias-state-error-primary, #d4380d)' }}
           >
             退出登录
           </button>
@@ -401,8 +406,8 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
                 zIndex: 10,
                 minWidth: 260,
                 padding: '12px 14px',
-                background: '#ffffff',
-                border: '1px solid #e5e5e5',
+                background: 'var(--dsw-specific-menu, #ffffff)',
+                border: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
                 borderRadius: 8,
                 boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
               }}
@@ -415,13 +420,13 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
                   left: 28,
                   width: 10,
                   height: 10,
-                  background: '#ffffff',
-                  borderLeft: '1px solid #e5e5e5',
-                  borderTop: '1px solid #e5e5e5',
+                  background: 'var(--dsw-specific-menu, #ffffff)',
+                  borderLeft: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
+                  borderTop: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
                   transform: 'rotate(45deg)',
                 }}
               />
-              <div style={{ fontSize: 13, color: '#333', marginBottom: 10 }}>
+              <div style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary, #333)', marginBottom: 10 }}>
                 退出登录将回到登录页
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
@@ -429,7 +434,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
                   type="button"
                   onClick={() => setConfirmingSignOut(false)}
                   disabled={busy}
-                  style={{ ...buttonStyle, padding: '4px 12px', background: 'none', borderColor: '#d9d9d9', color: '#333' }}
+                  style={{ ...buttonStyle, padding: '4px 12px', background: 'none', borderColor: 'var(--dsw-alias-border-l2, #d9d9d9)', color: 'var(--dsw-alias-label-primary, #333)' }}
                 >
                   取消
                 </button>
@@ -437,7 +442,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
                   type="button"
                   onClick={() => void signOut()}
                   disabled={busy}
-                  style={{ ...buttonStyle, padding: '4px 12px', background: '#d4380d', color: '#ffffff' }}
+                  style={{ ...buttonStyle, padding: '4px 12px', background: 'var(--dsw-alias-state-error-primary, #d4380d)', color: '#ffffff' }}
                 >
                   确认退出
                 </button>
@@ -446,7 +451,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
           )}
         </div>
         {notice?.owner === 'account' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
             {notice.text}
           </p>
         )}
@@ -454,7 +459,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
 
       <section style={cardStyle}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>修改用户名</h2>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary, #333)' }}>修改用户名</h2>
           <button
             type="button"
             onClick={() => setExpanded(expanded === 'username' ? null : 'username')}
@@ -498,7 +503,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
               <button
                 type="submit"
                 disabled={busy}
-                style={{ ...buttonStyle, background: '#4d6bfe', color: '#ffffff' }}
+                style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
               >
                 修改用户名
               </button>
@@ -506,7 +511,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
           </form>
         )}
         {notice?.owner === 'username' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: expanded === 'username' ? '12px 0 0' : '8px 0 0' }}>
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: expanded === 'username' ? '12px 0 0' : '8px 0 0' }}>
             {notice.text}
           </p>
         )}
@@ -514,7 +519,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
 
       <section style={cardStyle}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>修改密码</h2>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary, #333)' }}>修改密码</h2>
           <button
             type="button"
             onClick={() => setExpanded(expanded === 'password' ? null : 'password')}
@@ -568,7 +573,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
               <button
                 type="submit"
                 disabled={busy}
-                style={{ ...buttonStyle, background: '#4d6bfe', color: '#ffffff' }}
+                style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
               >
                 修改密码
               </button>
@@ -576,15 +581,15 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
           </form>
         )}
         {notice?.owner === 'password' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: expanded === 'password' ? '12px 0 0' : '8px 0 0' }}>
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: expanded === 'password' ? '12px 0 0' : '8px 0 0' }}>
             {notice.text}
           </p>
         )}
       </section>
 
       <section style={cardStyle}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>登录要求</h2>
-        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>登录要求</h2>
+        <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
           若启用，本机地址将要求登录，建议在多人共享服务器、需禁止同机其他账号免登录时启用。
         </p>
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
@@ -594,7 +599,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
               width: 40,
               height: 22,
               borderRadius: 11,
-              background: loopbackLoginCheck ? '#4d6bfe' : '#c4c4c4',
+              background: loopbackLoginCheck ? 'var(--dsw-alias-button-info-fill, #4d6bfe)' : 'var(--dsw-alias-bg-overlay, #c4c4c4)',
               transition: 'background 0.2s',
               flexShrink: 0,
             }}
@@ -623,15 +628,15 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
           本机登录校验
         </label>
         {notice?.owner === 'policy' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
             {notice.text}
           </p>
         )}
       </section>
 
       <section style={cardStyle}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px' }}>会话有效期</h2>
-        <p style={{ fontSize: 13, color: '#666', margin: '0 0 12px' }}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>会话有效期</h2>
+        <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
           登录后会话 cookie 的有效天数。调整后对新登录的会话生效，已登录的会话不受影响。
         </p>
         <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
@@ -648,7 +653,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
           </select>
         </label>
         {notice?.owner === 'sessionMaxAge' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? '#237804' : '#d4380d', margin: '8px 0 0' }}>
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
             {notice.text}
           </p>
         )}
