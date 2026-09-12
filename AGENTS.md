@@ -144,7 +144,7 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 - **页面导航（GET/HEAD）**缺原生 cookie → 包装器直接 **303 + Set-Cookie + Location 原路径**（上游 token 交换同款跳法），下一请求即过原生闸门；**RPC/静态资源** 不跳（303 会把 POST 变 GET），转发下游（浏览器已从页面跳拿到 cookie）。
 - **未认证的页面导航** → 302 `/login`（上游只会回 401 纯文本，丑）；未认证 RPC/静态资源 → 401。
 - **secret 缺席竞态**：connection 插件激活时才建 secret，可能晚于本插件——secret 缺席时本次不补签、下请求重试；**绝不自己创建**（密钥归上游）。缓存按 credentials 服务实例做 WeakMap，实例更换（重启/重装）自动失效。
-- **补签是强耦合点**：cookie 格式、名称算法、存储 key 任一上游变更都要跟——升级 dsh 后第一步 diff `browser-auth.ts`（`docs/upgrade-dsh-0.1.2-playbook.md` 观察哨；0.1.5-rc.1 已逐项核查零变更，见 `docs/upgrade-dsh-0.1.5-playbook.md`）。
+- **补签是强耦合点**：cookie 格式、名称算法、存储 key 任一上游变更都要跟——升级 dsh 后第一步 diff `browser-auth.ts`（`docs/upgrade-dsh-0.1.2-playbook.md` 观察哨；0.1.5-rc.1 已逐项核查零变更，见 `docs/upgrade-dsh-0.1.5-playbook.md`；0.1.5-rc.2 经 npm tarball 产物对比确认与 rc.1 零代码差异）。
 - **`dsh_sid` 仍是唯一认证边界**：只带原生 cookie 不带 `dsh_sid` 的请求照样拒绝——原生 cookie 无账号、30 天不可撤销，登出/改密/`auth-reset` 的可撤销性全靠包装器兜住。登出响应除清 `dsh_sid` 外追加 `Max-Age=0` 的同名原生 cookie（名字可算、不需 secret）。
 
 **「浏览器端 scope gate」isLoopback 覆盖——0.1.2 换用 transport hook（重要）**：DSH 前端 `connection.isLoopback` 由**浏览器地址栏 hostname** 判定（`connection/src/client/index.ts`；rc.1 编译产物里 `isLoopback: transport?.ownsHost === true || … || isLoopbackHostname(pageLocation.hostname)`），远程浏览器恒为 false。**0.1.2 上游真实 cookie 认证只解决了"进 UI"，没解决 settings mirror**：`ui-settings` 的 mirror 持久化判定读 `ctx.remote.$host.isLoopback`（rc.1 `lib/client.js` 的 `apply`；api-gateway 的 `$host` getter 转写 `connection.isLoopback`）——LAN 浏览器得 `memory` 模式，mirror **永不读 host**（`ensure`/`load` 直接 resolve），于是任何依赖 describe 应答的设置面（Models「提供方目录」）抛 **"settings are unavailable in this browser"**（`ui-settings-models/src/client/store.ts` 在 `mirrored.view === undefined` 时 throw），其他设置面则静默空转。**实测（2026-09-03，LAN 192.168.5.216 真实浏览器）**：通用设置/插件/插件市场/认证都渲染，唯独 Models 必现此错——**早前"0.1.2 LAN 五 section 全部渲染、无 unavailable"的验收结论是把回环验证当成了 LAN，不实，已废**。
@@ -263,7 +263,7 @@ dsh web
 ## 约定（本项目内）
 
 - **发版按 `docs/release-guide.md` 执行**（检查→验证→bump→推送→tag→notes→确认 Actions）。Release notes 面向用户：每条一行带短提交号，只写「新增了什么/修复了什么」，不写实现细节；结构参照上一版，中英双语。
-- **版本跟进基线**：README 声明跟进官方 `next` dist-tag（不跟 `alpha`）。当前基线 dsh 0.1.5-rc.1（0.1.5-rc.1 适配核查见 `docs/upgrade-dsh-0.1.5-playbook.md`；0.1.2 迁移手册见 `docs/upgrade-dsh-0.1.2-playbook.md`）；上游再出 `next` 新版本时按两手册「观察哨」核对（先 diff `browser-auth.ts`）。
+- **版本跟进基线**：README 声明跟进官方 `next` dist-tag（不跟 `alpha`）。当前基线 dsh 0.1.5-rc.2（0.1.5-rc.1 适配核查见 `docs/upgrade-dsh-0.1.5-playbook.md`，rc.2 经产物对比与 rc.1 零代码差异；0.1.2 迁移手册见 `docs/upgrade-dsh-0.1.2-playbook.md`）；上游再出 `next` 新版本时按两手册「观察哨」核对（先 diff `browser-auth.ts`）。
 - 文件：`src/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见「依赖更新（Renovate 机器人）」）、`README.md`（用户文档）。
 - **改源码后必须 `npm run build`**（tsc + tsdown），否则 profile 里跑的还是旧产物；发布前必须保证 `npm pack` 全链路（prepack）通过。
 - 不要为了「省事」改掉 `cordis.patch.yml` 里的 `connection.inject: [webAuth]`——它保证 auth 在 API 路由注册前生效，是安全边界的一部分。
