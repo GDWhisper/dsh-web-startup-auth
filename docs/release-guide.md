@@ -89,6 +89,13 @@ gh 不可用时兜底：curl 调 REST API（`POST /repos/<owner>/<repo>/releases
 
 最后确认 Actions「Publish to npm」跑完且 success，npm registry 上出现新版。
 
+**注意 npm 的处理延迟（很容易误判成发布失败）**：`npm publish` 被接受后，npm 要几分钟才把版本写进 registry 元数据。期间 `npm view dsh-web-startup-auth@<版本>` 报 404、`dist-tags.latest` 仍指向旧版，看上去像"没发上去"。实测 v0.1.10：17:20:23 发布成功，**17:24:31** 才出现在 packument。核对时：
+
+- 等几分钟再看，别在发布后几十秒就下结论——日志里 npm 的原话就是 `Your package is being processed and may take a few minutes to become available.`。
+- 以官方 packument 为准（加 cache-buster 绕开 CDN 缓存）：`curl -H 'Cache-Control: no-cache' "https://registry.npmjs.org/dsh-web-startup-auth?t=$(date +%s)"`，核对 `versions`、`time`、`dist-tags` 三处。
+- **tarball 直链返回 200、而 packument 里没有该版本 = 仍在处理**，不是故障。此时不要改版本号重发，也不要去找 npm 人工批准。
+- 同一次 tag push 偶发触发两条 workflow run 属正常：后一条会因为版本正在处理而报 `E409 Cannot publish over previously staged version`，可忽略，无需清理，也无需改 workflow。
+
 ## 检查清单
 
 - [ ] 工作区干净，待发提交明确
