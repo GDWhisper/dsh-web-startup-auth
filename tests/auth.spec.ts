@@ -718,6 +718,8 @@ describe('GET /api/auth/status', () => {
     return JSON.parse(captured.body ?? '{}') as {
       registered: boolean
       authenticated: boolean
+      session: boolean
+      trusted: boolean
       username?: string
     }
   }
@@ -727,7 +729,7 @@ describe('GET /api/auth/status', () => {
     // deployment trusts the local browser, so an unregistered deployment must
     // not send it to a login page that would bounce it straight back.
     const status = await readStatus('127.0.0.1', { ip: '127.0.0.1', host: '127.0.0.1:3080' })
-    expect(status).toEqual({ registered: false, authenticated: true })
+    expect(status).toEqual({ registered: false, authenticated: true, session: false, trusted: true })
   })
 
   it('reports a proxied browser as unauthenticated until it logs in', async () => {
@@ -735,19 +737,28 @@ describe('GET /api/auth/status', () => {
     // remote, so registration and login apply instead of implicit trust.
     registerCredentials('admin', 'supersecret1')
     const status = await readStatus('127.0.0.1', { ip: '127.0.0.1', host: 'dsh.example.com' })
-    expect(status).toEqual({ registered: true, authenticated: false })
+    expect(status).toEqual({ registered: true, authenticated: false, session: false, trusted: false })
   })
 
   it('reports a LAN caller as unauthenticated until it logs in', async () => {
     registerCredentials('admin', 'supersecret1')
     const status = await readStatus('0.0.0.0', remote)
-    expect(status).toEqual({ registered: true, authenticated: false })
+    expect(status).toEqual({ registered: true, authenticated: false, session: false, trusted: false })
   })
 
   it('names the session user for an authenticated remote caller', async () => {
     registerCredentials('admin', 'supersecret1')
     const status = await readStatus('0.0.0.0', { ...remote, cookie: sessionCookie('admin') })
-    expect(status).toEqual({ registered: true, authenticated: true, username: 'admin' })
+    expect(status).toEqual({ registered: true, authenticated: true, session: true, trusted: false, username: 'admin' })
+  })
+
+  it('separates "trusted" from "signed in" for a local browser', async () => {
+    // The default loopback deployment: no cookie at all, yet the caller is
+    // authorized (and stays authorized after /api/auth/logout, which is why
+    // the tab must not offer a sign-out button that cannot do anything).
+    registerCredentials('admin', 'supersecret1')
+    const status = await readStatus('127.0.0.1', { ip: '127.0.0.1', host: '127.0.0.1:3080' })
+    expect(status).toEqual({ registered: true, authenticated: true, session: false, trusted: true, username: 'admin' })
   })
 })
 

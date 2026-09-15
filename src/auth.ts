@@ -544,13 +544,26 @@ export function apply(ctx: Context, _config: Config): void {
       path: '/api/auth/status',
       handler: async (req, res) => {
         const registered = hasCredentials()
-        const authenticated = isAuthorized(req)
-        // Username is only exposed once authenticated: a trusted (loopback)
-        // origin gets the stored username, a remote caller only its own session.
-        const username = authenticated
-          ? (isTrustedOrigin(req) ? getUsername() : validateSessionCookie(req))
-          : undefined
-        jsonResponse(res, 200, { registered, authenticated, username })
+        // Two independent facts, because `authenticated` alone cannot express
+        // them: does this caller *hold* a session, and is it merely waved
+        // through by loopback trust? A local browser on a default deployment
+        // is trusted without any cookie, so it is authorized but not signed
+        // in — "退出登录" has nothing to revoke there, and the tab has to say
+        // so instead of showing a signed-in identity.
+        const session = validateSessionCookie(req)
+        const trusted = isTrustedOrigin(req)
+        const authenticated = session !== undefined || trusted
+        // A session names its own user. A trusted caller holding none gets the
+        // stored admin name — that is the account that exists, not an identity
+        // this caller proved.
+        const username = session ?? (trusted ? getUsername() : undefined)
+        jsonResponse(res, 200, {
+          registered,
+          authenticated,
+          session: session !== undefined,
+          trusted,
+          username,
+        })
       },
     },
     {

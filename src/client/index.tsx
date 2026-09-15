@@ -14,7 +14,7 @@ import type { PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { CSSProperties, ReactElement } from 'react'
 import { useCallback, useEffect, useState } from 'react'
 // Inlined by tsdown (dependency-free constants module shared with the node half).
-import { DEFAULT_SESSION_MAX_AGE_DAYS, SESSION_MAX_AGE_CHOICES } from '../session-limits.ts'
+import { SESSION_MAX_AGE_CHOICES } from '../session-limits.ts'
 
 /**
  * Service required before the section can be registered. The settings
@@ -55,24 +55,145 @@ const SHIELD_GLYPH_MARKUP =
 /** How long a status/action message stays visible. */
 const MESSAGE_MS = 5000
 
-/** The username shown in the tab (undefined until the status fetch resolves). */
-function useUsername(): [string | undefined, (username: string) => void] {
-  const [username, setUsername] = useState<string | undefined>(undefined)
+/** The answer shape of `/api/auth/status` (fields absent on older servers). */
+type AuthStatusBody = {
+  username?: string
+  registered?: boolean
+  session?: boolean
+  trusted?: boolean
+}
+
+/** One status read: the parsed answer, or a failure that leaves it unknown. */
+type StatusRead = { body: AuthStatusBody } | { failed: true }
+
+/** Reads `/api/auth/status`; never rejects, so callers need no try/catch. */
+async function readStatus(): Promise<StatusRead> {
+  try {
+    const res = await fetch('/api/auth/status')
+    if (!res.ok) return { failed: true }
+    return { body: (await res.json()) as AuthStatusBody }
+  } catch {
+    return { failed: true }
+  }
+}
+
+/** Reads the loopback-login policy; `undefined` means "could not read". */
+async function readPolicy(): Promise<boolean | undefined> {
+  try {
+    const res = await fetch('/api/auth/policy')
+    if (!res.ok) return undefined
+    const data = (await res.json()) as { requireLoopbackLogin?: boolean }
+    return typeof data.requireLoopbackLogin === 'boolean' ? data.requireLoopbackLogin : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** Reads the configured session lifetime; `undefined` means "could not read". */
+async function readSessionMaxAge(): Promise<number | undefined> {
+  try {
+    const res = await fetch('/api/auth/session-max-age')
+    if (!res.ok) return undefined
+    const data = (await res.json()) as { days?: number }
+    return typeof data.days === 'number' ? data.days : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** A read handed to the first tab that mounts: what settled, plus what is still in flight. */
+type Prefetch<T> = { settled?: T; pending?: Promise<T> }
+
+/**
+ * Starts a read now — while this bundle initializes — and returns a taker that
+ * hands the result out once.
+ *
+ * Why not at mount: a request born when the tab mounts lands in the middle of
+ * the SPA's startup burst, so it queues behind everything else sharing the six
+ * same-origin connections. Browser-measured 2026-09-16: the requests
+ * themselves are ~5 ms (queue 1 ms + TTFB 2 ms) and the slowest startup call
+ * was 74 ms on a clean instance, yet a live instance can hold such a latecomer
+ * up for ten-odd seconds. That wait showed up as placeholders at best, and as
+ * a *wrong* answer at worst — the policy switch rendered as OFF (its `useState`
+ * default) while the backend said ON, for as long as the read was queued.
+ */
+function startPrefetch<T>(read: () => Promise<T>): () => Prefetch<T> {
+  let inflight: Promise<T> | undefined = read()
+  let settled: T | undefined
+  void inflight.then((value) => { settled = value })
+  return () => {
+    // Handed out once: later mounts and explicit refreshes read fresh, so a
+    // stale answer can never be reused as the current state.
+    const taken: Prefetch<T> = { settled, pending: inflight }
+    settled = undefined
+    inflight = undefined
+    return taken
+  }
+}
+
+const takeStatusPrefetch = startPrefetch(readStatus)
+const takePolicyPrefetch = startPrefetch(readPolicy)
+const takeSessionMaxAgePrefetch = startPrefetch(readSessionMaxAge)
+
+/**
+ * The account state behind the tab.
+ *
+ * `registered` carries its own meaning beyond the username: a loopback caller
+ * is implicitly trusted before any admin exists, so `/api/auth/status` reports
+ * `authenticated: true` with no username. Only `registered === false` tells the
+ * tab that creating the first admin is still on the table — that state has no
+ * username *and* no remote account yet, and it is exactly the case where the
+ * sign-out / change-password forms are meaningless but registration is not.
+ */
+function useAccountStatus(): {
+  username: string | undefined
+  registered: boolean | undefined
+  /** Whether this browser holds a session cookie (see `/api/auth/status`). */
+  session: boolean | undefined
+  /** Whether this caller is waved through by loopback trust instead. */
+  trusted: boolean | undefined
+  /** Whether the last read failed, leaving every other field unknown. */
+  failed: boolean
+  /** Re-reads the status; the trust verdict changes when the policy flips. */
+  refresh: () => void
+  setUsername: (username: string) => void
+} {
+  // Consumed once, on the first render (see `startPrefetch`).
+  const [prefetch] = useState(takeStatusPrefetch)
+  const initialBody = prefetch.settled !== undefined && 'body' in prefetch.settled
+    ? prefetch.settled.body
+    : undefined
+  const [username, setUsername] = useState<string | undefined>(initialBody?.username)
+  const [registered, setRegistered] = useState<boolean | undefined>(initialBody?.registered)
+  const [session, setSession] = useState<boolean | undefined>(initialBody?.session)
+  const [trusted, setTrusted] = useState<boolean | undefined>(initialBody?.trusted)
+  const [failed, setFailed] = useState(prefetch.settled !== undefined && 'failed' in prefetch.settled)
+  const [nonce, setNonce] = useState(0)
   useEffect(() => {
+    // The first render already applied a settled prefetch.
+    if (nonce === 0 && prefetch.settled !== undefined) return
     let cancelled = false
-    void (async () => {
-      try {
-        const res = await fetch('/api/auth/status')
-        if (!res.ok) return
-        const data = (await res.json()) as { username?: string }
-        if (!cancelled && typeof data.username === 'string') setUsername(data.username)
-      } catch {
-        // Status is best-effort; the tab still renders without a name.
+    const source = nonce === 0 && prefetch.pending !== undefined ? prefetch.pending : readStatus()
+    void source.then((result) => {
+      if (cancelled) return
+      if ('failed' in result) {
+        // A failed read is NOT a signed-out verdict. The fields stay unknown
+        // so the card asserts nothing it never read.
+        setFailed(true)
+        return
       }
-    })()
+      // Every field is written from this one answer, the empty ones included:
+      // a name read for an older state must not outlive it.
+      setUsername(typeof result.body.username === 'string' ? result.body.username : undefined)
+      if (typeof result.body.registered === 'boolean') setRegistered(result.body.registered)
+      if (typeof result.body.session === 'boolean') setSession(result.body.session)
+      if (typeof result.body.trusted === 'boolean') setTrusted(result.body.trusted)
+      setFailed(false)
+    })
     return () => { cancelled = true }
-  }, [])
-  return [username, setUsername]
+  }, [nonce, prefetch])
+  const refresh = useCallback(() => setNonce((value) => value + 1), [])
+  return { username, registered, session, trusted, failed, refresh, setUsername }
 }
 
 /**
@@ -81,25 +202,24 @@ function useUsername(): [string | undefined, (username: string) => void] {
  * address is also required to present a session. OUT OF THE BOX it is OFF
  * (loopback trusted = 本机免登录); it only flips ON on an explicit admin
  * action (e.g. a shared multi-user server).
+ *
+ * `undefined` means the flag has not been read: the switch then renders as
+ * unknown instead of as OFF. Rendering the `useState` default as OFF while the
+ * backend answers ON is the bug this guards against (browser-verified
+ * 2026-09-16: the switch showed OFF for 117 ms on a warm tab, and for as long
+ * as the read stayed queued on a busy one).
  */
-function useLoopbackLoginCheck(): [boolean, (value: boolean) => void] {
-  const [loopbackLoginCheck, setLoopbackLoginCheck] = useState(false)
+function useLoopbackLoginCheck(): [boolean | undefined, (value: boolean) => void] {
+  const [prefetch] = useState(takePolicyPrefetch)
+  const [loopbackLoginCheck, setLoopbackLoginCheck] = useState<boolean | undefined>(prefetch.settled)
   useEffect(() => {
+    if (prefetch.settled !== undefined) return
     let cancelled = false
-    void (async () => {
-      try {
-        const res = await fetch('/api/auth/policy')
-        if (!res.ok) return
-        const data = (await res.json()) as { requireLoopbackLogin?: boolean }
-        if (!cancelled && typeof data.requireLoopbackLogin === 'boolean') {
-          setLoopbackLoginCheck(data.requireLoopbackLogin === true)
-        }
-      } catch {
-        // Policy is best-effort; the tab still renders with the switch off.
-      }
-    })()
+    void (prefetch.pending ?? readPolicy()).then((value) => {
+      if (!cancelled && value !== undefined) setLoopbackLoginCheck(value)
+    })
     return () => { cancelled = true }
-  }, [])
+  }, [prefetch])
   return [loopbackLoginCheck, setLoopbackLoginCheck]
 }
 
@@ -108,25 +228,21 @@ function useLoopbackLoginCheck(): [boolean, (value: boolean) => void] {
  * `sessionMaxAgeDays` (see session-limits.ts for the selectable choices);
  * OUT OF THE BOX it is the 14-day default. Changing it only affects freshly
  * issued sessions — existing cookies keep the expiry baked in at sign time.
+ *
+ * `undefined` means the value has not been read: the field says so rather than
+ * showing a default the backend may not hold.
  */
-function useSessionMaxAge(): [number, (days: number) => void] {
-  const [days, setDays] = useState(DEFAULT_SESSION_MAX_AGE_DAYS)
+function useSessionMaxAge(): [number | undefined, (days: number) => void] {
+  const [prefetch] = useState(takeSessionMaxAgePrefetch)
+  const [days, setDays] = useState<number | undefined>(prefetch.settled)
   useEffect(() => {
+    if (prefetch.settled !== undefined) return
     let cancelled = false
-    void (async () => {
-      try {
-        const res = await fetch('/api/auth/session-max-age')
-        if (!res.ok) return
-        const data = (await res.json()) as { days?: number }
-        if (!cancelled && typeof data.days === 'number') {
-          setDays(data.days)
-        }
-      } catch {
-        // Best-effort; the tab still renders with the default selection.
-      }
-    })()
+    void (prefetch.pending ?? readSessionMaxAge()).then((value) => {
+      if (!cancelled && value !== undefined) setDays(value)
+    })
     return () => { cancelled = true }
-  }, [])
+  }, [prefetch])
   return [days, setDays]
 }
 
@@ -193,7 +309,36 @@ type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'passwor
  * outcome inline.
  */
 export function AuthSection(props: PropsRuntime<'settings.section'>): ReactElement {
-  const [username, setUsername] = useUsername()
+  const { username, registered, session, trusted, failed, refresh, setUsername } = useAccountStatus()
+  /** True only when no admin exists yet (`registered` is undefined while loading). */
+  const needsRegistration = registered === false
+  /**
+   * True only when this browser holds a session cookie. A default loopback
+   * deployment is implicitly trusted, so `registered` (and therefore the rest
+   * of this tab) is reachable without one: such a caller is authorized but
+   * never signed in, and there is nothing for "退出登录" to revoke.
+   */
+  const signedIn = session === true
+  /**
+   * The card has no answer to stand on: either the first read has not
+   * returned, or the last read failed — a failed read carries no verdict
+   * either, and the fields still hold whatever the previous read said, which
+   * is not the current state. Reading this as "signed out" is what made a
+   * freshly logged-in browser claim "当前未登录，或登录已失效" and offer a
+   * pointless "前往登录" button, and it stuck there for as long as the status
+   * request went unanswered (browser-verified 2026-09-16: the wrong copy
+   * showed ~25 ms on a warm tab, and indefinitely while the request was
+   * blocked).
+   */
+  const statusUnknown = failed || session === undefined || trusted === undefined
+  /**
+   * Signed out *and* out of luck, as a *read answer* reports it: no session,
+   * and this origin is not trusted either (loopback login check on, or a
+   * remote caller). Everything else in the SPA is 401-ing in this state, so
+   * the card points at the login page rather than claiming the address is
+   * exempt.
+   */
+  const signedOut = !statusUnknown && !signedIn && trusted !== true
   const [loopbackLoginCheck, setLoopbackLoginCheck] = useLoopbackLoginCheck()
   const [sessionMaxAgeDays, setSessionMaxAgeDays] = useSessionMaxAge()
   const [newUsername, setNewUsername] = useState('')
@@ -255,6 +400,15 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
   }, [oldPassword, newPassword, confirm, flash])
 
   const toggleLoopbackLoginCheck = useCallback(async (next: boolean) => {
+    // Enabling requires an admin account — the backend refuses the flag before
+    // one exists (see `setRequireLoopbackLogin`), which would otherwise surface
+    // as a bare 400 here. Send the caller to the only page that can create it
+    // instead; the switch stays off and can be flipped once they return.
+    if (registered === false) {
+      flash({ kind: 'error', text: '尚未设置管理员账号，正在前往注册页…', owner: 'policy' })
+      window.setTimeout(() => { window.location.href = '/login' }, 1200)
+      return
+    }
     setBusy(true)
     try {
       const res = await fetch('/api/auth/policy', {
@@ -265,6 +419,19 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       const data = (await res.json()) as { error?: string; requireLoopbackLogin?: boolean }
       if (res.ok) {
         setLoopbackLoginCheck(data.requireLoopbackLogin === true)
+        if (next && !signedIn) {
+          // Enabling withdraws the implicit trust this very page was riding
+          // on: from now on every protected route wants a session this browser
+          // does not have, so the SPA behind this tab is already 401-ing.
+          // Re-reading the status would only reword the card — send the caller
+          // to sign in instead, which is what "本机地址将要求登录" means here.
+          flash({ kind: 'ok', text: '已启用：本机地址将要求登录，正在前往登录页…', owner: 'policy' })
+          window.setTimeout(() => { window.location.href = '/login' }, 1200)
+          return
+        }
+        // The trust verdict behind `authenticated` moved even when this caller
+        // keeps its session, so the account card has to be re-read.
+        refresh()
         flash({ kind: 'ok', text: next ? '已启用：本机地址将要求登录' : '已关闭：本机访问免登录', owner: 'policy' })
       } else {
         flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'policy' })
@@ -274,7 +441,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
     } finally {
       setBusy(false)
     }
-  }, [flash, setLoopbackLoginCheck])
+  }, [flash, refresh, registered, signedIn, setLoopbackLoginCheck])
 
   /** Persists the selected session lifetime immediately on change (mirrors
    * the policy toggle: load via hook, save on interaction, flash the outcome). */
@@ -381,241 +548,297 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxWidth: 460 }}>
-      <section style={cardStyle}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>账号</h2>
-        <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
-          {username !== undefined ? `当前登录：${username}` : '当前登录：管理员'}
-        </p>
-        <div style={{ position: 'relative', display: 'inline-block' }}>
+      {needsRegistration && (
+        <section style={{ ...cardStyle, borderColor: 'var(--dsw-alias-state-error-primary, #d4380d)' }}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 12px', color: 'var(--dsw-alias-label-primary, #333)' }}>尚未设置管理员账号</h2>
           <button
             type="button"
-            onClick={() => setConfirmingSignOut(true)}
-            disabled={busy}
-            style={{ ...buttonStyle, background: 'none', borderColor: 'var(--dsw-alias-state-error-primary, #d4380d)', color: 'var(--dsw-alias-state-error-primary, #d4380d)' }}
+            onClick={() => { window.location.href = '/login' }}
+            style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
           >
-            退出登录
+            前往设置管理员账号
           </button>
-          {confirmingSignOut && (
-            <div
-              role="alertdialog"
-              aria-label="确认退出登录"
-              style={{
-                position: 'absolute',
-                top: 'calc(100% + 10px)',
-                left: 0,
-                zIndex: 10,
-                minWidth: 260,
-                padding: '12px 14px',
-                background: 'var(--dsw-specific-menu, #ffffff)',
-                border: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
-                borderRadius: 8,
-                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
-              }}
+        </section>
+      )}
+
+      {!needsRegistration && (
+        <>
+        <section style={cardStyle}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>账号</h2>
+          {/* The identity line exists only once a read answered: while the
+              state is unknown there is no name to show, and the "管理员"
+              fallback would itself be an unfounded claim. */}
+          {!statusUnknown && (
+            <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
+              {signedIn
+                ? `当前登录：${username ?? '管理员'}`
+                : `管理员账号：${username ?? '管理员'}`}
+            </p>
+          )}
+          {failed ? (
+            <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: 0 }}>
+              无法读取登录状态，请重新打开此设置页。
+            </p>
+          ) : statusUnknown ? (
+            <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: 0 }}>
+              正在读取登录状态…
+            </p>
+          ) : signedIn ? (
+          <div style={{ position: 'relative', display: 'inline-block' }}>
+            <button
+              type="button"
+              onClick={() => setConfirmingSignOut(true)}
+              disabled={busy}
+              style={{ ...buttonStyle, background: 'none', borderColor: 'var(--dsw-alias-state-error-primary, #d4380d)', color: 'var(--dsw-alias-state-error-primary, #d4380d)' }}
             >
+              退出登录
+            </button>
+            {confirmingSignOut && (
               <div
-                aria-hidden
+                role="alertdialog"
+                aria-label="确认退出登录"
                 style={{
                   position: 'absolute',
-                  top: -6,
-                  left: 28,
-                  width: 10,
-                  height: 10,
+                  top: 'calc(100% + 10px)',
+                  left: 0,
+                  zIndex: 10,
+                  minWidth: 260,
+                  padding: '12px 14px',
                   background: 'var(--dsw-specific-menu, #ffffff)',
-                  borderLeft: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
-                  borderTop: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
-                  transform: 'rotate(45deg)',
+                  border: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
+                  borderRadius: 8,
+                  boxShadow: '0 4px 12px rgba(0, 0, 0, 0.12)',
                 }}
-              />
-              <div style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary, #333)', marginBottom: 10 }}>
-                退出登录将回到登录页
+              >
+                <div
+                  aria-hidden
+                  style={{
+                    position: 'absolute',
+                    top: -6,
+                    left: 28,
+                    width: 10,
+                    height: 10,
+                    background: 'var(--dsw-specific-menu, #ffffff)',
+                    borderLeft: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
+                    borderTop: '1px solid var(--dsw-alias-border-l3, #e5e5e5)',
+                    transform: 'rotate(45deg)',
+                  }}
+                />
+                <div style={{ fontSize: 13, color: 'var(--dsw-alias-label-primary, #333)', marginBottom: 10 }}>
+                  退出登录将回到登录页
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingSignOut(false)}
+                    disabled={busy}
+                    style={{ ...buttonStyle, padding: '4px 12px', background: 'none', borderColor: 'var(--dsw-alias-border-l2, #d9d9d9)', color: 'var(--dsw-alias-label-primary, #333)' }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void signOut()}
+                    disabled={busy}
+                    style={{ ...buttonStyle, padding: '4px 12px', background: 'var(--dsw-alias-state-error-primary, #d4380d)', color: '#ffffff' }}
+                  >
+                    确认退出
+                  </button>
+                </div>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-                <button
-                  type="button"
-                  onClick={() => setConfirmingSignOut(false)}
-                  disabled={busy}
-                  style={{ ...buttonStyle, padding: '4px 12px', background: 'none', borderColor: 'var(--dsw-alias-border-l2, #d9d9d9)', color: 'var(--dsw-alias-label-primary, #333)' }}
-                >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void signOut()}
-                  disabled={busy}
-                  style={{ ...buttonStyle, padding: '4px 12px', background: 'var(--dsw-alias-state-error-primary, #d4380d)', color: '#ffffff' }}
-                >
-                  确认退出
-                </button>
-              </div>
-            </div>
+            )}
+          </div>
+          ) : signedOut ? (
+            <>
+              <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
+                当前未登录，或登录已失效。
+              </p>
+              <button
+                type="button"
+                onClick={() => { window.location.href = '/login' }}
+                style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
+              >
+                前往登录
+              </button>
+            </>
+          ) : (
+            <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: 0 }}>
+              本机地址免登录；需要强制登录时，打开下方「登录要求」的开关。
+            </p>
           )}
-        </div>
-        {notice?.owner === 'account' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
-            {notice.text}
-          </p>
-        )}
-      </section>
+          {notice?.owner === 'account' && (
+            <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
+              {notice.text}
+            </p>
+          )}
+        </section>
 
-      <section style={cardStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary, #333)' }}>修改用户名</h2>
-          <button
-            type="button"
-            onClick={() => setExpanded(expanded === 'username' ? null : 'username')}
-            disabled={busy}
-            aria-label={expanded === 'username' ? '收起' : '修改用户名'}
-            aria-expanded={expanded === 'username'}
-            style={{ ...linkStyle, padding: 12, margin: -12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-          >
-            <Chevron up={expanded === 'username'} />
-          </button>
-        </div>
-        {expanded === 'username' && (
-          <form
-            onSubmit={(event) => {
-              event.preventDefault()
-              void changeUsername()
-            }}
-            style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}
-          >
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-              新用户名
-              <input
-                type="text"
-                value={newUsername}
-                onChange={(event) => setNewUsername(event.target.value)}
-                autoComplete="username"
-                style={inputStyle}
-              />
-            </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-              当前密码
-              <input
-                type="password"
-                value={usernamePassword}
-                onChange={(event) => setUsernamePassword(event.target.value)}
-                autoComplete="current-password"
-                style={inputStyle}
-              />
-            </label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <button
-                type="submit"
-                disabled={busy}
-                style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
-              >
-                修改用户名
-              </button>
-            </div>
-          </form>
-        )}
-        {notice?.owner === 'username' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: expanded === 'username' ? '12px 0 0' : '8px 0 0' }}>
-            {notice.text}
-          </p>
-        )}
-      </section>
+        <section style={cardStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary, #333)' }}>修改用户名</h2>
+            <button
+              type="button"
+              onClick={() => setExpanded(expanded === 'username' ? null : 'username')}
+              disabled={busy}
+              aria-label={expanded === 'username' ? '收起' : '修改用户名'}
+              aria-expanded={expanded === 'username'}
+              style={{ ...linkStyle, padding: 12, margin: -12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Chevron up={expanded === 'username'} />
+            </button>
+          </div>
+          {expanded === 'username' && (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault()
+                void changeUsername()
+              }}
+              style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}
+            >
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                新用户名
+                <input
+                  type="text"
+                  value={newUsername}
+                  onChange={(event) => setNewUsername(event.target.value)}
+                  autoComplete="username"
+                  style={inputStyle}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                当前密码
+                <input
+                  type="password"
+                  value={usernamePassword}
+                  onChange={(event) => setUsernamePassword(event.target.value)}
+                  autoComplete="current-password"
+                  style={inputStyle}
+                />
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
+                >
+                  修改用户名
+                </button>
+              </div>
+            </form>
+          )}
+          {notice?.owner === 'username' && (
+            <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: expanded === 'username' ? '12px 0 0' : '8px 0 0' }}>
+              {notice.text}
+            </p>
+          )}
+        </section>
 
-      <section style={cardStyle}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary, #333)' }}>修改密码</h2>
-          <button
-            type="button"
-            onClick={() => setExpanded(expanded === 'password' ? null : 'password')}
-            disabled={busy}
-            aria-label={expanded === 'password' ? '收起' : '修改密码'}
-            aria-expanded={expanded === 'password'}
-            style={{ ...linkStyle, padding: 12, margin: -12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
-          >
-            <Chevron up={expanded === 'password'} />
-          </button>
-        </div>
-        {expanded === 'password' && (
-          <form
-            onSubmit={(event) => {
-              event.preventDefault()
-              void changePassword()
-            }}
-            style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}
-          >
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-              当前密码
-              <input
-                type="password"
-                value={oldPassword}
-                onChange={(event) => setOldPassword(event.target.value)}
-                autoComplete="current-password"
-                style={inputStyle}
-              />
-            </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-              新密码
-              <input
-                type="password"
-                value={newPassword}
-                onChange={(event) => setNewPassword(event.target.value)}
-                autoComplete="new-password"
-                style={inputStyle}
-              />
-            </label>
-            <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
-              确认新密码
-              <input
-                type="password"
-                value={confirm}
-                onChange={(event) => setConfirm(event.target.value)}
-                autoComplete="new-password"
-                style={inputStyle}
-              />
-            </label>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-              <button
-                type="submit"
-                disabled={busy}
-                style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
-              >
-                修改密码
-              </button>
-            </div>
-          </form>
-        )}
-        {notice?.owner === 'password' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: expanded === 'password' ? '12px 0 0' : '8px 0 0' }}>
-            {notice.text}
-          </p>
-        )}
-      </section>
+        <section style={cardStyle}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <h2 style={{ fontSize: 16, fontWeight: 600, margin: 0, color: 'var(--dsw-alias-label-primary, #333)' }}>修改密码</h2>
+            <button
+              type="button"
+              onClick={() => setExpanded(expanded === 'password' ? null : 'password')}
+              disabled={busy}
+              aria-label={expanded === 'password' ? '收起' : '修改密码'}
+              aria-expanded={expanded === 'password'}
+              style={{ ...linkStyle, padding: 12, margin: -12, display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}
+            >
+              <Chevron up={expanded === 'password'} />
+            </button>
+          </div>
+          {expanded === 'password' && (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault()
+                void changePassword()
+              }}
+              style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}
+            >
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                当前密码
+                <input
+                  type="password"
+                  value={oldPassword}
+                  onChange={(event) => setOldPassword(event.target.value)}
+                  autoComplete="current-password"
+                  style={inputStyle}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                新密码
+                <input
+                  type="password"
+                  value={newPassword}
+                  onChange={(event) => setNewPassword(event.target.value)}
+                  autoComplete="new-password"
+                  style={inputStyle}
+                />
+              </label>
+              <label style={{ display: 'flex', flexDirection: 'column', gap: 4, fontSize: 13 }}>
+                确认新密码
+                <input
+                  type="password"
+                  value={confirm}
+                  onChange={(event) => setConfirm(event.target.value)}
+                  autoComplete="new-password"
+                  style={inputStyle}
+                />
+              </label>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  style={{ ...buttonStyle, background: 'var(--dsw-alias-button-info-fill, #4d6bfe)', color: '#ffffff' }}
+                >
+                  修改密码
+                </button>
+              </div>
+            </form>
+          )}
+          {notice?.owner === 'password' && (
+            <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: expanded === 'password' ? '12px 0 0' : '8px 0 0' }}>
+              {notice.text}
+            </p>
+          )}
+        </section>
+        </>
+      )}
 
       <section style={cardStyle}>
         <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>登录要求</h2>
         <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
-          若启用，本机地址将要求登录，建议在多人共享服务器、需禁止同机其他账号免登录时启用。
+          {needsRegistration
+            ? '设置管理员账号后可启用此开关：启用后本机地址也要求登录。'
+            : loopbackLoginCheck === undefined
+              ? '正在读取登录要求…'
+              : '若启用，本机地址将要求登录，建议在多人共享服务器、需禁止同机其他账号免登录时启用。'}
         </p>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: loopbackLoginCheck === undefined ? 'default' : 'pointer', fontSize: 13 }}>
           <span
             style={{
               position: 'relative',
               width: 40,
               height: 22,
               borderRadius: 11,
-              background: loopbackLoginCheck ? 'var(--dsw-alias-button-info-fill, #4d6bfe)' : 'var(--dsw-alias-bg-overlay, #c4c4c4)',
+              background: loopbackLoginCheck === true ? 'var(--dsw-alias-button-info-fill, #4d6bfe)' : 'var(--dsw-alias-bg-overlay, #c4c4c4)',
+              opacity: loopbackLoginCheck === undefined ? 0.5 : 1,
               transition: 'background 0.2s',
               flexShrink: 0,
             }}
           >
             <input
               type="checkbox"
-              checked={loopbackLoginCheck}
-              disabled={busy}
+              checked={loopbackLoginCheck === true}
+              disabled={busy || loopbackLoginCheck === undefined}
               onChange={(event) => void toggleLoopbackLoginCheck(event.target.checked)}
-              style={{ position: 'absolute', inset: 0, margin: 0, width: '100%', height: '100%', opacity: 0, cursor: 'pointer' }}
+              style={{ position: 'absolute', inset: 0, margin: 0, width: '100%', height: '100%', opacity: 0, cursor: 'inherit' }}
             />
             <span
               style={{
                 position: 'absolute',
                 top: 2,
-                left: loopbackLoginCheck ? 20 : 2,
+                left: loopbackLoginCheck === true ? 20 : 2,
                 width: 18,
                 height: 18,
                 borderRadius: '50%',
@@ -634,30 +857,36 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
         )}
       </section>
 
-      <section style={cardStyle}>
-        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>会话有效期</h2>
-        <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
-          登录后会话 cookie 的有效天数。调整后对新登录的会话生效，已登录的会话不受影响。
-        </p>
-        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
-          有效期
-          <select
-            value={sessionMaxAgeDays}
-            disabled={busy}
-            onChange={(event) => void saveSessionMaxAge(Number(event.target.value))}
-            style={{ ...inputStyle, width: 'auto' }}
-          >
-            {SESSION_MAX_AGE_CHOICES.map((days) => (
-              <option key={days} value={days}>{days} 天</option>
-            ))}
-          </select>
-        </label>
-        {notice?.owner === 'sessionMaxAge' && (
-          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
-            {notice.text}
+      {!needsRegistration && (
+        <section style={cardStyle}>
+          <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>会话有效期</h2>
+          <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
+            登录后会话 cookie 的有效天数。调整后对新登录的会话生效，已登录的会话不受影响。
           </p>
-        )}
-      </section>
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+            有效期
+            {sessionMaxAgeDays === undefined ? (
+              <span style={{ color: 'var(--dsw-alias-label-tertiary, #666)' }}>正在读取…</span>
+            ) : (
+              <select
+                value={sessionMaxAgeDays}
+                disabled={busy}
+                onChange={(event) => void saveSessionMaxAge(Number(event.target.value))}
+                style={{ ...inputStyle, width: 'auto' }}
+              >
+                {SESSION_MAX_AGE_CHOICES.map((days) => (
+                  <option key={days} value={days}>{days} 天</option>
+                ))}
+              </select>
+            )}
+          </label>
+          {notice?.owner === 'sessionMaxAge' && (
+            <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
+              {notice.text}
+            </p>
+          )}
+        </section>
+      )}
     </div>
   )
 }

@@ -52,11 +52,13 @@ git push origin v<x.y.z>   # 这一步触发 Actions
 - **每条一行，带提交编号**：`- 功能一句话（用户视角的效果）(#<短提交号>)`。
 - 按「新增 / 修复」分组，没有的组写「无 / Nothing」，不要硬凑。
 - 结尾保留「验证」段：测试数量与 typecheck/build 状态。
-- 标题：`v<x.y.z> — 一句话主题`。
+- 标题：只写版本号 `v<x.y.z>`，**不加破折号小标题**；那一句话主题挪到 notes 正文的**首行**（独立成行，不带版本号前缀）。
 
 **模板：**
 
 ```markdown
+<一句话主题>
+
 ## 变更内容
 
 dsh-web-startup-auth `v<x.y.z>`，以 dsh `next` 通道为基线（<当前基线版本>）。
@@ -80,7 +82,7 @@ dsh-web-startup-auth `v<x.y.z>`，以 dsh `next` 通道为基线（<当前基线
 ### 6. 创建 Release 并确认发布
 
 ```sh
-gh release create v<x.y.z> --title "v<x.y.z> — <一句话主题>" --notes-file <notes 文件>
+gh release create v<x.y.z> --title "v<x.y.z>" --notes-file <notes 文件>
 ```
 
 gh 不可用时兜底：curl 调 REST API（`POST /repos/<owner>/<repo>/releases`，body 用 `jq -n --rawfile` 构造）。
