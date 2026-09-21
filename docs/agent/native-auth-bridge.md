@@ -8,7 +8,7 @@
 
 新机制：**原生 cookie 补签**——凡通过我方认证（有效 `dsh_sid` 或真回环，`isTrustedOrigin`）的请求，若缺原生 cookie，则用上游存于 credentials 服务的签名密钥（`credentialKey('client-connection','browser-session')`，只读不建）按**请求的真实 authority**（`new URL('http://'+Host).host` 规范化）补发 `dsh-auth-<sha256(authority)>` cookie（值 = `v1.<base64url(payload)>.<base64url(HMAC)>`，30 天，格式逐字节对齐上游）。
 
-- **页面导航（GET/HEAD）**缺原生 cookie → 包装器直接回 **200 + Set-Cookie + `meta refresh` 回原路径**（跳板页；**不用 3xx**——重定向响应里新设的 cookie 在 Safari/Firefox 上不会带给重定向目标，303 补签会被逐跳重放直到 `ERR_TOO_MANY_REDIRECTS`，见 PR #31 / issue #30），下一请求即过原生闸门；**非导航 GET/HEAD**（fetch/EventSource，`sec-fetch-mode` 非 `navigate`）仍走 **303** 单跳（fetch 类客户端透明跟随）；**RPC（POST）** 不跳（303 会把 POST 变 GET），转发下游（浏览器已从页面跳拿到 cookie）。
+- **页面导航（GET/HEAD）**缺原生 cookie → 包装器直接回 **200 + Set-Cookie + `meta refresh` 回原路径**（跳板页；**不用 3xx**——重定向响应里新设的 cookie 在 Safari/Firefox 上不会带给重定向目标，303 补签会被逐跳重放直到 `ERR_TOO_MANY_REDIRECTS`，见 PR #31 / issue #30），下一请求即过原生闸门；**非导航 GET/HEAD**（fetch/EventSource，`sec-fetch-mode` 非 `navigate`/`nested-navigate`）仍走 **303** 单跳（fetch 类客户端透明跟随）；**RPC（POST）** 不跳（303 会把 POST 变 GET），转发下游（浏览器已从页面跳拿到 cookie）。
 - **未认证的页面导航** → 302 `/login`（上游只会回 401 纯文本，丑）；未认证 RPC/静态资源 → 401。
 - **secret 缺席竞态**：connection 插件激活时才建 secret，可能晚于本插件——secret 缺席时本次不补签、下请求重试；**绝不自己创建**（密钥归上游）。缓存按 credentials 服务实例做 WeakMap，实例更换（重启/重装）自动失效。
 - **补签是强耦合点**：cookie 格式、名称算法、存储 key 任一上游变更都要跟——升级 dsh 后第一步 diff `browser-auth.ts`（`docs/upgrade-dsh-0.1.2-playbook.md` 观察哨；0.1.5-rc.1 已逐项核查零变更，见 `docs/upgrade-dsh-0.1.5-playbook.md`；0.1.5-rc.2 经 npm tarball 产物对比确认与 rc.1 零代码差异）。

@@ -515,13 +515,26 @@ function mintBounceDocument(url: string): string {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
-  return `<!doctype html><meta charset="utf-8"><meta http-equiv="refresh" content="0;url=${escaped}"><title></title>`
+  // `location.replace` (not `assign`) so the bounce leaves no history entry;
+  // the meta refresh below is the no-JS fallback. JSON.stringify covers
+  // quotes/backslashes/control chars and `<` is escaped so the URL can never
+  // close the script element.
+  const jsSafe = JSON.stringify(url).replace(/</g, '\\u003c')
+  return `<!doctype html><meta charset="utf-8"><title>正在跳转…</title><script>location.replace(${jsSafe})</script><meta http-equiv="refresh" content="0;url=${escaped}">`
 }
 
-/** True when the request looks like a page navigation (vs an XHR/fetch). */
+/**
+ * True when the request looks like a page navigation (vs an XHR/fetch).
+ *
+ * `nested-navigate` (iframe/frame documents) counts as well: it is a real
+ * navigation that hits the same redirect-replay trap as a top-level one —
+ * a 303 inside a frame loops to ERR_TOO_MANY_REDIRECTS just the same —
+ * and a bounce document works inside a frame exactly as it does top-level.
+ * Clients that omit `Sec-Fetch-Mode` entirely fall back to `Accept`.
+ */
 function isPageNavigation(req: IncomingMessage): boolean {
   const mode = req.headers['sec-fetch-mode']
-  if (typeof mode === 'string' && mode !== 'navigate') return false
+  if (typeof mode === 'string' && mode !== 'navigate' && mode !== 'nested-navigate') return false
   if (mode === undefined) {
     const accept = req.headers.accept
     return typeof accept === 'string' && accept.includes('text/html')
@@ -1085,7 +1098,12 @@ export function apply(ctx: Context, _config: Config): void {
           (req.method === 'GET' || req.method === 'HEAD')) {
         const minted = await mintBrowserCookie(req)
         if (minted !== undefined) {
-          const url = req.url ?? '/'
+          // Only ever bounce to a path on this origin. An absolute-form
+          // request target (`GET http://host/...`, `GET //host/...`) must
+          // not turn the mint into an open redirect — the 303 era carried
+          // that hole in its Location header, so guard both branches.
+          const target = req.url ?? '/'
+          const url = target.startsWith('/') && !target.startsWith('//') ? target : '/'
           if (isPageNavigation(req)) {
             // 200 bounce, never a 3xx: see `mintBounceDocument`.
             res.writeHead(200, {

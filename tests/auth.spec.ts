@@ -493,7 +493,73 @@ describe('native browser-auth cookie bridge', () => {
     expect(captured.location).toBeUndefined()
     expect(captured.contentType).toBe('text/html; charset=utf-8')
     expect(captured.body).toContain('<meta http-equiv="refresh" content="0;url=/app">')
+    // The JS path replaces (no history entry); the meta refresh is its
+    // no-JS fallback.
+    expect(captured.body).toContain('location.replace("/app")')
     expectValidNativeCookie(captured.setCookie ?? '')
+  })
+
+  it('mints the native cookie with a 200 bounce for an iframe navigation', async () => {
+    // `nested-navigate` is a real navigation (frame documents) and hits the
+    // same redirect-replay trap as a top-level one, so it gets the bounce
+    // too: a 303 inside a frame loops to ERR_TOO_MANY_REDIRECTS just the
+    // same, reachable whenever a cross-site page embeds this origin.
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: 'dsh.example.com',
+        ip: '192.0.2.90',
+        cookie: sessionCookie('admin'),
+        headers: { 'sec-fetch-mode': 'nested-navigate' },
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(captured.location).toBeUndefined()
+    expect(captured.body).toContain('<meta http-equiv="refresh" content="0;url=/app">')
+    expectValidNativeCookie(captured.setCookie ?? '')
+  })
+
+  it('never bounces to an off-origin target (absolute-form request targets)', async () => {
+    // An absolute-form request target (`GET http://evil/...`) or a
+    // protocol-relative one (`GET //evil/...`) must not turn the mint into
+    // an open redirect: both the bounce and the 303 stay on this origin.
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+
+    const navigated = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: 'http://evil.example/steal',
+        host: 'dsh.example.com',
+        ip: '192.0.2.90',
+        cookie: sessionCookie('admin'),
+        headers: { 'sec-fetch-mode': 'navigate' },
+      }),
+      navigated.res,
+    )
+    expect(navigated.captured.statusCode).toBe(200)
+    expect(navigated.captured.body).toContain('content="0;url=/"')
+    expect(navigated.captured.body).not.toContain('evil.example')
+
+    const fetched = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: '//evil.example/steal',
+        host: 'dsh.example.com',
+        ip: '192.0.2.90',
+        cookie: sessionCookie('admin'),
+      }),
+      fetched.res,
+    )
+    expect(fetched.captured.statusCode).toBe(303)
+    expect(fetched.captured.location).toBe('/')
+    expectValidNativeCookie(fetched.captured.setCookie ?? '')
   })
 
   it('mints the native cookie for a genuine loopback caller (local browser)', async () => {
