@@ -133,6 +133,7 @@ interface CapturedResponse {
   setCookie?: string
   setCookies?: string[]
   location?: string
+  contentType?: string
 }
 
 function jsonResponseCapture() {
@@ -142,6 +143,7 @@ function jsonResponseCapture() {
       captured.statusCode = code
       if (headers !== undefined) {
         if (typeof headers.location === 'string') captured.location = headers.location
+        if (typeof headers['content-type'] === 'string') captured.contentType = headers['content-type']
         const value = headers['set-cookie']
         if (Array.isArray(value)) {
           captured.setCookies = [...value]
@@ -404,8 +406,10 @@ describe('route wrapping coverage', () => {
 // Upstream signs its own `dsh-auth-<sha256(authority)>` cookie with a secret
 // in the credentials service. A caller our session layer trusts (valid
 // `dsh_sid` or genuine loopback) but that upstream does not know yet must be
-// handed that cookie; the bridge mints it in a single 303 hop for page
-// navigations and in the login-family responses.
+// handed that cookie; the bridge mints it with a 200 bounce document for page
+// navigations (a 3xx mint is replayed on every hop until
+// ERR_TOO_MANY_REDIRECTS in Safari/Firefox) and hands it out directly in the
+// login-family responses.
 
 /** A fixed 32-byte secret for the fake credentials provider. */
 const FAKE_BROWSER_SECRET = Buffer.alloc(32, 7).toString('base64url')
@@ -439,7 +443,7 @@ describe('native browser-auth cookie bridge', () => {
     },
   }
 
-  it('mints the native cookie on a 303 hop for an authenticated page navigation', async () => {
+  it('mints the native cookie with a 200 bounce for an authenticated page navigation', async () => {
     registerCredentials('admin', 'secret1')
     const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
     const route = findRoute(routes, '/app')
@@ -454,8 +458,10 @@ describe('native browser-auth cookie bridge', () => {
       }),
       res,
     )
-    expect(captured.statusCode).toBe(303)
-    expect(captured.location).toBe('/app')
+    expect(captured.statusCode).toBe(200)
+    expect(captured.location).toBeUndefined()
+    expect(captured.contentType).toBe('text/html; charset=utf-8')
+    expect(captured.body).toContain('<meta http-equiv="refresh" content="0;url=/app">')
     expect(captured.setCookies).toHaveLength(1)
     const payload = expectValidNativeCookie(captured.setCookie ?? '')
     // The cookie is bound to the caller's own authority, never a loopback one.
@@ -472,7 +478,8 @@ describe('native browser-auth cookie bridge', () => {
       httpRequest({ url: '/app', host: '127.0.0.1:3080', ip: '127.0.0.1', accept: 'text/html' }),
       res,
     )
-    expect(captured.statusCode).toBe(303)
+    expect(captured.statusCode).toBe(200)
+    expect(captured.body).toContain('<meta http-equiv="refresh" content="0;url=/app">')
     const payload = expectValidNativeCookie(captured.setCookie ?? '')
     expect(payload.authority).toBe('127.0.0.1:3080')
   })
@@ -597,6 +604,53 @@ describe('native browser-auth cookie bridge', () => {
     const payload = expectValidNativeCookie(native ?? '')
     expect(payload.authority).toBe('dsh.example.com')
   })
+  it('keeps the 3xx mint for non-navigation GETs (fetch-style clients)', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    // No `sec-fetch-mode` and no `Accept: text/html`: not a page navigation,
+    // so the mint keeps its 3xx shape (a fetch-style client follows it).
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: 'dsh.example.com',
+        ip: '192.0.2.90',
+        cookie: sessionCookie('admin'),
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(303)
+    expect(captured.location).toBe('/app')
+    expectValidNativeCookie(captured.setCookie ?? '')
+  })
+
+  it('cannot be walked into a redirect chain (every mint answer is terminal)', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    // Ten no-cookie navigations in a row (the caller never picks the cookie
+    // up, as a browser that drops redirect-set cookies would): every answer
+    // is a terminal 200 + Set-Cookie + meta refresh, so the client can never
+    // be bounced into ERR_TOO_MANY_REDIRECTS the way the 303 mint did.
+    for (let i = 0; i < 10; i++) {
+      const { captured, res } = jsonResponseCapture()
+      await route.handler(
+        httpRequest({
+          url: '/app',
+          host: 'dsh.example.com',
+          ip: '192.0.2.91',
+          accept: 'text/html',
+          cookie: sessionCookie('admin'),
+        }),
+        res,
+      )
+      expect(captured.statusCode).toBe(200)
+      expect(captured.location).toBeUndefined()
+      expect(captured.body).toContain('<meta http-equiv="refresh" content="0;url=/app">')
+      expectValidNativeCookie(captured.setCookie ?? '')
+    }
+  })
 })
 
 // The 0.1.2 SPA index is served through the webserver's fallback seat
@@ -624,7 +678,7 @@ describe('index fallback seat wrapping', () => {
     expect(rejected.captured.statusCode).toBe(302)
     expect(rejected.captured.location).toBe('/login')
 
-    // Authenticated remote caller without the native cookie: 303 + mint.
+    // Authenticated remote caller without the native cookie: 200 bounce + mint.
     const minted = jsonResponseCapture()
     await fallback!(
       httpRequest({
@@ -635,8 +689,9 @@ describe('index fallback seat wrapping', () => {
       }),
       minted.res,
     )
-    expect(minted.captured.statusCode).toBe(303)
-    expect(minted.captured.location).toBe('/')
+    expect(minted.captured.statusCode).toBe(200)
+    expect(minted.captured.location).toBeUndefined()
+    expect(minted.captured.body).toContain('<meta http-equiv="refresh" content="0;url=/">')
     const payload = expectValidNativeCookie(minted.captured.setCookie ?? '')
     expect(payload.authority).toBe('dsh.example.com')
   })
@@ -656,7 +711,7 @@ describe('index fallback seat wrapping', () => {
       httpRequest({ host: '127.0.0.1:3080', ip: '127.0.0.1', accept: 'text/html' }),
       minted.res,
     )
-    expect(minted.captured.statusCode).toBe(303)
+    expect(minted.captured.statusCode).toBe(200)
     expectValidNativeCookie(minted.captured.setCookie ?? '')
 
     // The wrapped handler still serves the index once the caller is known.
