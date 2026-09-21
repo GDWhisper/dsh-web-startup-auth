@@ -266,11 +266,13 @@ function httpRequest(opts: {
   ip?: string
   accept?: string
   method?: string
+  headers?: Record<string, string>
 }): IncomingMessage {
   const headers: Record<string, string> = {}
   if (opts.host !== undefined) headers.host = opts.host
   if (opts.cookie !== undefined) headers.cookie = opts.cookie
   if (opts.accept !== undefined) headers.accept = opts.accept
+  if (opts.headers !== undefined) Object.assign(headers, opts.headers)
   return {
     headers,
     method: opts.method ?? 'GET',
@@ -466,6 +468,32 @@ describe('native browser-auth cookie bridge', () => {
     const payload = expectValidNativeCookie(captured.setCookie ?? '')
     // The cookie is bound to the caller's own authority, never a loopback one.
     expect(payload.authority).toBe('192.168.5.216:3080')
+  })
+
+  it('mints the native cookie with a 200 bounce for a real browser navigation', async () => {
+    // Browsers send `Sec-Fetch-Mode: navigate` on page navigations; the
+    // Accept-header fallback only covers clients that omit it. Both must
+    // land on the 200 bounce, never a 3xx that Safari/Firefox replay into
+    // ERR_TOO_MANY_REDIRECTS (issue #30).
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials())
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: '192.168.5.216:3080',
+        ip: '192.168.5.216',
+        cookie: sessionCookie('admin'),
+        headers: { 'sec-fetch-mode': 'navigate' },
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(captured.location).toBeUndefined()
+    expect(captured.contentType).toBe('text/html; charset=utf-8')
+    expect(captured.body).toContain('<meta http-equiv="refresh" content="0;url=/app">')
+    expectValidNativeCookie(captured.setCookie ?? '')
   })
 
   it('mints the native cookie for a genuine loopback caller (local browser)', async () => {
@@ -713,6 +741,7 @@ describe('index fallback seat wrapping', () => {
     )
     expect(minted.captured.statusCode).toBe(200)
     expectValidNativeCookie(minted.captured.setCookie ?? '')
+    expect(minted.captured.body).toContain('<meta http-equiv="refresh" content="0;url=/">')
 
     // The wrapped handler still serves the index once the caller is known.
     const served = jsonResponseCapture()

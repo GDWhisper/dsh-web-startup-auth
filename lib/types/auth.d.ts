@@ -23,8 +23,10 @@
  *   exemption, and `index.html` is gated the same way. A valid `dsh_sid`
  *   session — or a genuine loopback request (loopback peer address *and*
  *   loopback `Host`, see `isTrustedOrigin`) — passes our wrapper, and the
- *   wrapper mints the native cookie on the fly (single 303 hop for page
- *   navigations) so the very next request satisfies upstream. The bind
+ *   wrapper mints the native cookie on the fly (a 200 bounce document
+ *   with a meta refresh for page navigations, a single 303 for
+ *   non-navigation GET/HEAD) so the very next request satisfies upstream.
+ *   The bind
  *   address alone is not a trust signal: binding to 127.0.0.1 behind a
  *   reverse proxy still serves remote clients, whose forwarded `Host` names
  *   the public domain.
