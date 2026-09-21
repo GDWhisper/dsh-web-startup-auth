@@ -103,12 +103,12 @@ connection 新增 `ConnectionRecoveryConfig`（backoff 参数）与 `__DSH_CONNE
 **curl 验收（LAN 192.168.5.216:3080 + 回环）**：
 
 - 匿名 LAN `GET /`（`Accept: text/html`）→ 302 `/login`；`/login`、`/api/auth/status` → 200；受保护 `/api/*` → 401。
-- 自签 `dsh_sid`（`web-auth.json` secret）LAN `GET /` → 303 + `Set-Cookie dsh-auth-<sha256(192.168.5.216:3080)>`（cookie 名与算法核对一致），带双 cookie 重放 → 200 且含 `__DSH_BOOT__`。
+- 自签 `dsh_sid`（`web-auth.json` secret）LAN `GET /`（`Accept: text/html`）→ **200 跳板 + `Set-Cookie dsh-auth-<sha256(192.168.5.216:3080)>` + `meta refresh` 回原路径**（cookie 名与算法核对一致；补发不用 3xx，见 `docs/agent/native-auth-bridge.md`），带双 cookie 重放 → 200 且含 `__DSH_BOOT__`。
 - 仅原生 cookie 无 `dsh_sid` → 302 `/login`（`dsh_sid` 仍是唯一边界）。
 - 登出 → 双 cookie `Max-Age=0`。
 - client.js（boot 图 URL `/plugins/??dsh-web-startup-auth/client.js&rev=…`）已认证 200 / 未认证 401。
 - 0.1.5 新增文件上传路由 `POST /api/session/uploadFileBinary`：未认证 401；已认证进入上游（400/415 为上游参数/媒体类型校验，非 401，说明已过认证边界）。
-- 回环补签：GET `/`、GET `/api` 缺 cookie → 303 + Set-Cookie；POST RPC → 401（303 会把 POST 变 GET，故不跳）。远程 token URL 被登录墙拦为 302 `/login`（**顺带修正 AGENTS「0.1.2 的回环体验闭环」一节的旧表述**）。
+- 回环补签：页面导航（浏览器 `GET /`，`Accept: text/html`）缺 cookie → **200 跳板** + Set-Cookie；非导航（`curl` 默认 `Accept: */*`，无 `sec-fetch-mode`）GET `/`、`/api` 缺 cookie → **303** + Set-Cookie；POST RPC → 401（303 会把 POST 变 GET，故不跳）。远程 token URL 被登录墙拦为 302 `/login`（**补发形状的权威表述以 `docs/agent/native-auth-bridge.md` 与 `docs/agent/auth-mechanics.md`「0.1.2 的回环体验闭环」为准**）。
 
 **真实 LAN 浏览器（chromium headless via agent-browser，注入自签 `dsh_sid`）**：主界面正常加载；设置面板全部 section（通用设置/模型/插件/Agent 预设/插件市场/认证/侧边卡片）渲染；**Models「提供方目录」完整渲染、无 "settings are unavailable"**——`__DSH_TRANSPORT__.ownsHost` hook 在 0.1.5 生效（观察哨第 3 项实测确认）；认证标签页显示账号 `wpxxl` + 退出登录 + 修改用户名/密码 + 登录要求；全量 API 请求 200，第三方 `dshmarket/client.js`、`sidebar/api/*` 均 200；服务启动日志零 error/pending。
 

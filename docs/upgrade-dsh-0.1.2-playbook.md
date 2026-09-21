@@ -22,7 +22,7 @@
 
 ## 上游变化摘要（已核查的证据）
 
-harness 仓库位置：`/home/pax/coding/research/deepseek-harness`。拉取新 tag 时 git 直连/flaky 时走代理：
+harness 仓库位置（作者本机，见 `AGENTS.md`「路径约定」）：`~/coding/research/deepseek-harness`。拉取新 tag 时 git 直连/flaky 时走代理：
 `git -c http.version=HTTP/1.1 -c http.proxy=http://127.0.0.1:7897 fetch --depth 1 origin tag <tag>`（大 pack 传输易被截断，浅抓单 tag 最稳）。
 
 ### 破坏性（正面对撞本插件）
