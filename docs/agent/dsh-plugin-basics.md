@@ -93,4 +93,4 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 - `dsh --profile web --dump-config` 看组合后的插件树：确认 patch 生效、disabled 冲突、`# == <bundle>, patched by <bundle>` 标出的 patch 来源。
 - 插件加载失败体现在 dsh 启动日志；`apply` 里抛错会中断启动。最常见的启动失败是 **`Cannot find module '.../lib/xxx.js'`——没构建**。
 - 插件树里某行没有出现在 dump 输出，查 profile `package.json` 的 `dsh.profile.bundles` 是否有该包、patch 是否 `disabled`。
-- **前端插件不生效时**：先 `curl -s <主机>:<端口>/ | grep -o '__DSH_BOOT__[^<]*'` 看 entry 里有没有你的包名；再 `curl -s -o /dev/null -w "%{http_code}" <主机>:<端口>/plugins/<包名>/client.js` 应返回 200。若包名不在 boot 图里，查 patch 是否有「包根行」（`name` 为纯包名）、包根入口是否导出了 `apply()`。
+- **前端插件不生效时**：先 `curl -s <主机>:<端口>/ | grep -o '__DSH_BOOT__[^<]*'` 看 entry 里有没有你的包名；再**从该 entry 的 `url` 字段取真实地址**请求它（0.1.2 起是 `??<包名>/client.js&rev=…` 形态，0.1.7 起进一步改为**相对路径** `plugins/??<包名>/client.js&rev=…`；旧的平路径 `/plugins/<包名>/client.js` 早已 404），带会话时应 200。若包名不在 boot 图里，查 patch 是否有「包根行」（`name` 为纯包名）、包根入口是否导出了 `apply()`。

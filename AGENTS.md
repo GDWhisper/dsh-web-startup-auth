@@ -51,7 +51,8 @@ dsh --profile web auth-reset [--password <pwd>] [--username <name>]   # 重设�
 | 了解 dsh 插件机制、profile/patch/安装卸载、前端插件原理、启动排查 | `docs/agent/dsh-plugin-basics.md` |
 | 了解本项目结构、与原版差异、核心代码路径、对照上游源码 | `docs/agent/architecture.md` |
 | 改登录/会话/凭据/信任判定/路由保护/auth-reset/登录页 | `docs/agent/auth-mechanics.md` |
-| 改原生 cookie 补签、`__DSH_TRANSPORT__` hook、升级 dsh 后的适配 | `docs/agent/native-auth-bridge.md`（升级先看 `docs/upgrade-dsh-0.1.2-playbook.md` / `docs/upgrade-dsh-0.1.5-playbook.md` 的观察哨，第一步 diff `browser-auth.ts`） |
+| 改原生 cookie 补签、`__DSH_TRANSPORT__` hook、升级 dsh 后的适配 | `docs/agent/native-auth-bridge.md`（升级先看 `docs/upgrade-dsh-0.1.2-playbook.md` / `docs/upgrade-dsh-0.1.5-playbook.md` / `docs/upgrade-dsh-0.1.7-playbook.md` 的观察哨，第一步 diff `browser-auth.ts`） |
+| 正式版发布前确认插件是否还活着 | `docs/upgrade-dsh-0.1.7-playbook.md`（0.1.7-rc.1 三层验证：静态 diff + 构建探针 + 隔离实例实机；含待跟进 P1 `/oauth/callback`、P2 `$DSH_HOME`） |
 | 改设置面板「认证」标签页、slot 注册、导航图标、暗黑模式、预取与状态未知态 | `docs/agent/settings-section.md` |
 | 处理 Renovate 依赖更新 PR | `docs/agent/renovate.md` |
 | 发版 | `docs/release-guide.md` |
@@ -76,3 +77,4 @@ dsh --profile web auth-reset [--password <pwd>] [--username <name>]   # 重设�
 
 - profile 现状（作者本机）：`~/.dsh/profiles/web/` 以 `link:` 方式安装本插件（指向作者本机的仓库路径）；`dsh.profile.bundles` 含 `dsh-web-startup-auth`。改动后重启 `dsh web` 生效。
 - 版本跟进基线：README 声明跟进官方 `next` dist-tag（不跟 `alpha`）。当前基线 dsh 0.1.5-rc.2（0.1.5-rc.1 适配核查见 `docs/upgrade-dsh-0.1.5-playbook.md`，rc.2 经产物对比与 rc.1 零代码差异；0.1.2 迁移手册见 `docs/upgrade-dsh-0.1.2-playbook.md`）。
+- **正式版前置核查（2026-09-23）**：harness 源码已拉到 `dsh-v0.1.7-rc.1`（`next` 指向它，`latest` = 0.1.5-rc.3）。核查结论 = **插件存活、源码零改动**，且依赖是 caret 范围（稳定版一发布就会被 `npm install` 解析进来），故已在 0.1.7-rc.1 上完成构建探针 + 隔离实例实机验证。完整证据、待跟进项与迁移清单见 `docs/upgrade-dsh-0.1.7-playbook.md`。
