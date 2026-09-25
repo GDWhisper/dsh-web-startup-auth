@@ -2,8 +2,8 @@
  * File-based credential store for the auth plugin.
  *
  * Stores username, password hash, and session HMAC secret in
- * `~/.dsh/web-auth.json`. Created on first registration; read on every
- * authentication and session-verification.
+ * `$DSH_HOME/web-auth.json` (`~/.dsh/web-auth.json` by default). Created on
+ * first registration; read on every authentication and session-verification.
  */
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, chmodSync } from 'node:fs'
@@ -30,10 +30,25 @@ export function normalizeUsername(raw: string): string {
   return raw.replace(/[\u0000-\u001F\u007F]/g, '').trim()
 }
 
+/**
+ * dsh's data directory, mirroring the harness's own resolution
+ * (`@deepseek-ai/dsh-home-paths`): `$DSH_HOME` when set, otherwise `~/.dsh`.
+ *
+ * Reading the same root the harness reads keeps a custom-`DSH_HOME` deployment
+ * (or a second instance used for testing) from silently sharing — and
+ * overwriting — the credentials in the real `~/.dsh`. An empty or
+ * whitespace-only `$DSH_HOME` counts as unset, so a blank override never
+ * resolves the file against the current working directory.
+ * @returns the harness home directory.
+ */
+function dshHomeDir(): string {
+  const fromEnv = process.env.DSH_HOME
+  return fromEnv !== undefined && fromEnv.trim().length > 0 ? fromEnv : join(homedir(), '.dsh')
+}
+
 /** The persisted credential file (overridable via DSH_WEB_AUTH_FILE for tests). */
-const CREDENTIAL_DIR = join(homedir(), '.dsh')
 function credentialFile(): string {
-  return process.env.DSH_WEB_AUTH_FILE ?? join(CREDENTIAL_DIR, 'web-auth.json')
+  return process.env.DSH_WEB_AUTH_FILE ?? join(dshHomeDir(), 'web-auth.json')
 }
 
 /** In-memory snapshot of the credential file (re-read on every auth). */
@@ -48,6 +63,8 @@ interface CredentialFile {
   requireLoopbackLogin?: boolean
   /** Admin-selected session lifetime in days (see session-limits.ts). */
   sessionMaxAgeDays?: number
+  /** When true, the login endpoint also demands a solved slider puzzle. */
+  slideVerification?: boolean
 }
 
 /** Hash a password with a salt using scrypt. */
@@ -81,8 +98,9 @@ function readCredentials(): CredentialFile | undefined {
 
 /** Ensure the credential directory exists (owner-only access). */
 function ensureDir(): void {
-  if (!existsSync(CREDENTIAL_DIR)) {
-    mkdirSync(CREDENTIAL_DIR, { recursive: true, mode: 0o700 })
+  const dir = dshHomeDir()
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
   }
 }
 
@@ -201,6 +219,41 @@ export function setRequireLoopbackLogin(value: boolean): void {
   }
   if ((creds.requireLoopbackLogin === true) === value) return
   writeCredentials({ ...creds, requireLoopbackLogin: value })
+}
+
+/**
+ * Whether the login endpoint demands a solved slider puzzle.
+ *
+ * Defaults to `false`. The puzzle is decorative (see `src/slider/index.ts`),
+ * so this is off unless someone turns it on for fun — but it still costs a
+ * real step on every login, which is why it is never on by default.
+ * @returns the persisted flag; `false` before registration.
+ */
+export function getSlideVerification(): boolean {
+  return readCredentials()?.slideVerification === true
+}
+
+/**
+ * Persist the slider-puzzle requirement.
+ *
+ * Refuses to enable the switch before any admin account exists, for the same
+ * mechanical reason as {@link setRequireLoopbackLogin}: this flag lives in the
+ * credential file, and that file's mere existence is what `hasCredentials()`
+ * reads as "an administrator is registered". Writing one to hold a switch
+ * would therefore make the registration form unreachable — the first admin
+ * could never be created. Disabling is always allowed (and is a no-op with no
+ * file to write).
+ * @param value - the new flag value.
+ * @throws when no credentials exist yet and `value` is `true`.
+ */
+export function setSlideVerification(value: boolean): void {
+  const creds = readCredentials()
+  if (creds === undefined) {
+    if (value) throw new Error('web-auth: register an administrator before enabling the slider puzzle')
+    return
+  }
+  if ((creds.slideVerification === true) === value) return
+  writeCredentials({ ...creds, slideVerification: value })
 }
 
 /**

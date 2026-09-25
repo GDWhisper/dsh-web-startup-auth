@@ -101,6 +101,18 @@ async function readSessionMaxAge(): Promise<number | undefined> {
   }
 }
 
+/** Reads the slider-puzzle switch; `undefined` means "could not read". */
+async function readSlideVerification(): Promise<boolean | undefined> {
+  try {
+    const res = await fetch('/api/auth/challenge-policy')
+    if (!res.ok) return undefined
+    const data = (await res.json()) as { slideVerification?: unknown }
+    return typeof data.slideVerification === 'boolean' ? data.slideVerification : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** A read handed to the first tab that mounts: what settled, plus what is still in flight. */
 type Prefetch<T> = { settled?: T; pending?: Promise<T> }
 
@@ -134,6 +146,7 @@ function startPrefetch<T>(read: () => Promise<T>): () => Prefetch<T> {
 const takeStatusPrefetch = startPrefetch(readStatus)
 const takePolicyPrefetch = startPrefetch(readPolicy)
 const takeSessionMaxAgePrefetch = startPrefetch(readSessionMaxAge)
+const takeSlideVerificationPrefetch = startPrefetch(readSlideVerification)
 
 /**
  * The account state behind the tab.
@@ -247,6 +260,30 @@ function useSessionMaxAge(): [number | undefined, (days: number) => void] {
 }
 
 /**
+ * Tracks the "拼图验证" switch shown in the tab. Maps 1:1 to the backend flag
+ * `slideVerification` (no inversion): ON = the login endpoint also demands a
+ * solved slider puzzle. OUT OF THE BOX it is OFF.
+ *
+ * `undefined` means the flag has not been read: the switch then renders as
+ * unknown (disabled, semi-transparent) rather than as OFF, for the same reason
+ * as the loopback switch above — a backend that says ON must never be
+ * displayed as OFF.
+ */
+function useSlideVerification(): [boolean | undefined, (value: boolean) => void] {
+  const [prefetch] = useState(takeSlideVerificationPrefetch)
+  const [enabled, setEnabled] = useState<boolean | undefined>(prefetch.settled)
+  useEffect(() => {
+    if (prefetch.settled !== undefined) return
+    let cancelled = false
+    void (prefetch.pending ?? readSlideVerification()).then((value) => {
+      if (!cancelled && value !== undefined) setEnabled(value)
+    })
+    return () => { cancelled = true }
+  }, [prefetch])
+  return [enabled, setEnabled]
+}
+
+/**
  * Replace the settings nav's default gear for our row with the shield glyph.
  * Identity comes from the label text because the row button carries no id
  * attribute (React's `key` never reaches the DOM). Geometry and class are
@@ -301,7 +338,7 @@ function installAuthNavIcon(): void {
 }
 
 /** Transient message state (kind drives the color; owner picks the row that shows it). */
-type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' | 'policy' | 'sessionMaxAge' }
+type Notice = { kind: 'ok' | 'error'; text: string; owner: 'username' | 'password' | 'account' | 'policy' | 'sessionMaxAge' | 'challenge' }
 
 /**
  * The settings tab content. Sign-out navigates back to the login page;
@@ -341,6 +378,7 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
   const signedOut = !statusUnknown && !signedIn && trusted !== true
   const [loopbackLoginCheck, setLoopbackLoginCheck] = useLoopbackLoginCheck()
   const [sessionMaxAgeDays, setSessionMaxAgeDays] = useSessionMaxAge()
+  const [slideVerification, setSlideVerification] = useSlideVerification()
   const [newUsername, setNewUsername] = useState('')
   const [usernamePassword, setUsernamePassword] = useState('')
   const [oldPassword, setOldPassword] = useState('')
@@ -442,6 +480,44 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
       setBusy(false)
     }
   }, [flash, refresh, registered, signedIn, setLoopbackLoginCheck])
+
+  /**
+   * Flips the slider-puzzle switch. Unlike the loopback switch this can never
+   * lock anyone out — the puzzle is solvable — so there is no navigation side
+   * effect; the only failure mode is "no admin account yet", which the backend
+   * refuses (the flag lives in the credential file, whose existence is what
+   * marks the administrator as registered).
+   */
+  const toggleSlideVerification = useCallback(async (next: boolean) => {
+    if (registered === false) {
+      flash({ kind: 'error', text: '尚未设置管理员账号，正在前往注册页…', owner: 'challenge' })
+      window.setTimeout(() => { window.location.href = '/login' }, 1200)
+      return
+    }
+    setBusy(true)
+    try {
+      const res = await fetch('/api/auth/challenge-policy', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ slideVerification: next }),
+      })
+      const data = (await res.json()) as { error?: string; slideVerification?: unknown }
+      if (res.ok) {
+        setSlideVerification(data.slideVerification === true)
+        flash({
+          kind: 'ok',
+          text: next ? '已开启：登录时出现拼图验证' : '已关闭：登录不再出现拼图验证',
+          owner: 'challenge',
+        })
+      } else {
+        flash({ kind: 'error', text: data.error ?? '修改失败，请重试', owner: 'challenge' })
+      }
+    } catch {
+      flash({ kind: 'error', text: '修改失败，请重试', owner: 'challenge' })
+    } finally {
+      setBusy(false)
+    }
+  }, [flash, registered, setSlideVerification])
 
   /** Persists the selected session lifetime immediately on change (mirrors
    * the policy toggle: load via hook, save on interaction, flash the outcome). */
@@ -852,6 +928,59 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
         </label>
         {notice?.owner === 'policy' && (
           <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '8px 0 0' }}>
+            {notice.text}
+          </p>
+        )}
+      </section>
+
+      <section style={cardStyle}>
+        <h2 style={{ fontSize: 16, fontWeight: 600, margin: '0 0 4px', color: 'var(--dsw-alias-label-primary, #333)' }}>人机验证</h2>
+        <p style={{ fontSize: 13, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '0 0 12px' }}>
+          应网友要求加上了没什么用的防人机验证，有兴趣可以开启试试 XD
+        </p>
+        <label style={{ display: 'inline-flex', alignItems: 'center', gap: 8, cursor: slideVerification === undefined ? 'default' : 'pointer', fontSize: 13 }}>
+          <span
+            style={{
+              position: 'relative',
+              width: 40,
+              height: 22,
+              borderRadius: 11,
+              background: slideVerification === true ? 'var(--dsw-alias-button-info-fill, #4d6bfe)' : 'var(--dsw-alias-bg-overlay, #c4c4c4)',
+              opacity: slideVerification === undefined ? 0.5 : 1,
+              transition: 'background 0.2s',
+              flexShrink: 0,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={slideVerification === true}
+              disabled={busy || slideVerification === undefined}
+              onChange={(event) => void toggleSlideVerification(event.target.checked)}
+              style={{ position: 'absolute', inset: 0, margin: 0, width: '100%', height: '100%', opacity: 0, cursor: 'inherit' }}
+            />
+            <span
+              style={{
+                position: 'absolute',
+                top: 2,
+                left: slideVerification === true ? 20 : 2,
+                width: 18,
+                height: 18,
+                borderRadius: '50%',
+                background: '#ffffff',
+                transition: 'left 0.2s',
+                boxShadow: '0 1px 2px rgba(0, 0, 0, 0.2)',
+              }}
+            />
+          </span>
+          登录拼图验证
+        </label>
+        {(needsRegistration || slideVerification === undefined) && (
+          <p style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #666)', margin: '8px 0 0' }}>
+            {needsRegistration ? '需先设置管理员账号才能开启。' : '正在读取设置…'}
+          </p>
+        )}
+        {notice?.owner === 'challenge' && (
+          <p style={{ fontSize: 13, color: notice.kind === 'ok' ? 'var(--dsw-alias-state-success-primary, #237804)' : 'var(--dsw-alias-state-error-primary, #d4380d)', margin: '12px 0 0' }}>
             {notice.text}
           </p>
         )}

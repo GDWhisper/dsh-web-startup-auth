@@ -23,6 +23,16 @@
 - **CLI 不能首次建号**：`runAuthReset` 在未注册时抛「尚未注册管理员账号，无需重置」（`src/startup.ts:145`）。首次只能走 `/api/auth/register`（页面上就是 `/login` 的注册表单）。
 - **翻转开关的前端联动**（重读 status、四态账号卡）见 `settings-section.md`。
 
+## 登录人机验证与限流
+
+`slideVerification` 布尔开关，默认关闭。开启后 `/api/auth/login` 在比对密码**之前**要求先解出滑块拼图，失败计入限流预算。端点：`GET /api/auth/challenge`（**匿名**签发拼图，`/api/auth/` 前缀天然豁免）、`GET|POST /api/auth/challenge-policy`（需认证，字段 `slideVerification`）。持久化在 `web-auth.json`（`getSlideVerification`/`setSlideVerification`）。**它是装饰品**：答案就画在图上，实测 30 行脚本 100% 读出——别当安全边界。与「本机登录校验」同样的约束：**未注册时拒绝开启**（设置寄存在凭据文件里，为存设置创建该文件会让 `hasCredentials()` 判真、注册表单永久关闭）。
+
+**限流是两层，形状不同**：每 IP（10 分钟 5 次失败 → 锁 30 秒，原有）挡单源；**全局指数退避**（所有客户端累计失败超 20 次后按台阶翻倍，封顶 5 分钟，1 小时窗口清零）挡分布式——一千个地址各试几次，没有一个会触发每 IP 限制。全局惩罚对**真回环调用者豁免**（`isTrustedOrigin`，本机登录校验关着时），否则攻击者能用它把管理员锁在自己机器外面；开了本机登录校验则不再豁免。成功登录**不**重置全局计数。429 带 `Retry-After`。
+
+**验证必须在密码之前**：若先比密码，攻击者可用伪造的 `challengeId` 无限探测密码（密码错时根本不碰挑战）。代价是任何被拒的登录都已消耗挑战，所以登录页必须**每次失败都重取**。
+
+完整机制、实测攻击数据、分层、局限与观察哨见 **`human-verification.md`**（改 `src/slider/`、限流或登录页拼图控件前必读）。
+
 ## `authenticated` 不等于「已登录」（退出登录在本机是空操作）
 
 `isAuthorized()` = `isTrustedOrigin() || 有效会话`，本机免登录时第一项恒真，所以**点退出登录后 `authenticated` 依然是 true**——清掉的 `dsh_sid` 本来就没被用到，`GET /` 还会被静默补签回原生 cookie（浏览器页面导航走 200 跳板，见 `native-auth-bridge.md`），用户全程无感，回到认证页仍是「已登录」。前端把 `authenticated` 当「已登录」就会给出一个点了没任何效果的退出按钮。因此 status 端点（`src/auth.ts:545`）额外返回 **`session`（持有有效 `dsh_sid`）** 与 **`trusted`（靠本机隐式信任放行）**；`authenticated` 保持原义（tapIndex 跳转脚本、登录页、既有脚本都依赖它）。前端按 `session === true` 得 `signedIn`：`signedIn` 才显示「当前登录：xxx」+「退出登录」，否则显示「管理员账号：xxx」+ 一行说明「本机地址免登录……」且不渲染退出按钮。**username 取值同步改**：优先会话里的用户名，无会话才回落到 `getUsername()`（存储账号名，不是本调用者证明过的身份）。
@@ -66,5 +76,6 @@
 - `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`/api/auth/status` 的五种判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名 / **本机已注册但无会话：`authenticated:true` 而 `session:false`**，即退出登录后的本机状态）；认证端点（register/login/change-password/change-username：用户名净化、限速、密钥轮换、重签会话、旧/当前密码校验、同名 no-op 不轮换）；以及**原生 cookie 桥接**（0.1.2）：已认证页面导航缺原生 cookie → 200 跳板 + Set-Cookie + meta refresh 回原路径（非导航 GET 仍 303）、cookie 名随 authority（sha256）、值可 HMAC 校验对齐上游格式、回环免登录也补签、已带 cookie 直接转发、secret 缺席（fake provider 返回空）不 mint、非导航（POST RPC）不 303、未认证页面导航 → 302 /login、未认证 XHR → 401、登出清两 cookie、登录响应双 cookie。fake 的 `credentials` 服务通过 `fakeWebAuthContext(..., credentials)` 注入，secret 缓存按服务实例隔离（WeakMap）。
 - fake 请求**必须同时给 `socket.remoteAddress` 和 `headers.host`**——信任判定两个都读，缺一个就按远程处理（`requestWithCookie` / `httpRequest` / `jsonRequest` 默认给回环值）。
 - `tests/startup.spec.ts`：验证 `--host 0.0.0.0` 被接受、`webStartup` 服务值、`auth-reset` 子命令（改密/改用户名、密钥轮换、退出码）。
+- `tests/challenge-store.spec.ts` / `tests/slider.spec.ts`：拼图验证（含几何自洽、二维容差边界、五种剪影轮换、纹理同源、缺口无描边、盲猜命中率）与全局退避台阶/回环豁免；清单见 `human-verification.md`。
 - 每个测试 `beforeEach` 用 `mkdtempSync` + `DSH_WEB_AUTH_FILE` 隔离凭据文件，`afterEach` 清理。
 - **注意**：`npm pack` / `npm publish` 会触发 `prepack`（typecheck + test + build 全跑），测试不过无法发布。

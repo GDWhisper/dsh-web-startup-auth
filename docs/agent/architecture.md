@@ -2,7 +2,7 @@
 
 ## 仓库文件布局
 
-`src/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见 `renovate.md`）、`README.md`（用户文档）、`AGENTS.md`（本索引）+ `docs/agent/`（本目录，按任务展开的细节）。
+`src/*.ts`、`src/slider/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见 `renovate.md`）、`README.md`（用户文档）、`AGENTS.md`（本索引）+ `docs/agent/`（本目录，按任务展开的细节）。
 
 ## 它做了什么（与原版的差异）
 
@@ -18,11 +18,13 @@
 | 文件 | 职责 |
 |---|---|
 | `src/startup.ts` | `remote-web-startup` 插件：commander 解析 `--host/--port/--trusted-host`，`provide('webStartup', values)`；`auth-reset` 子命令（`runAuthReset`）；`WEB_STARTUP_SERVICE` 常量 |
-| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password/change-username）、包装 `webServer.register`/`registerUpgrade`/`registerFallback` 做全路由保护（认证 + 原生 cookie 补签，见 `native-auth-bridge.md`）、`tapIndex` 注入 randomUUID polyfill + 未登录跳转、`provide('webAuth')` |
-| `src/credential-store.ts` | 凭据持久化：scrypt 散列、`normalizeUsername`（剥 C0+DEL）/ `registerCredentials` / `validateCredentials` / `updateCredentials`（单次写+轮换）/ `resetPassword` / `changePassword` / `changeUsername` / `getUsername` / `signSession` / `verifySession` / `hasCredentials`；`DSH_WEB_AUTH_FILE` 覆盖 |
+| `src/auth.ts` | `web-auth` 插件：登录页路由、`/api/auth/*` 端点（status/register/login/logout/change-password/change-username/policy/session-max-age/challenge/challenge-policy）、包装 `webServer.register`/`registerUpgrade`/`registerFallback` 做全路由保护（认证 + 原生 cookie 补签，见 `native-auth-bridge.md`）、`tapIndex` 注入 randomUUID polyfill + 未登录跳转、`provide('webAuth')` |
+| `src/credential-store.ts` | 凭据持久化：scrypt 散列、`normalizeUsername`（剥 C0+DEL）/ `registerCredentials` / `validateCredentials` / `updateCredentials`（单次写+轮换）/ `resetPassword` / `changePassword` / `changeUsername` / `getUsername` / `signSession` / `verifySession` / `hasCredentials`；开关类配置 `requireLoopbackLogin` / `sessionMaxAgeDays` / `slideVerification`；`DSH_WEB_AUTH_FILE` 覆盖 |
+| `src/slider/` | 滑块拼图验证（默认关闭、装饰性，见 `human-verification.md`）：`index.ts` 编排（`auth.ts` 只 import 它）、`challenge.ts` 领域（几何/容差/路径/剪影抽签——真缺口五种形状随机/假缺口生成，答案线上只走坐标点）、`render.ts` 表现（程序化背景 + 缺口 + 形状不同的假缺口 + 拼图块 → SVG） |
+| `src/challenge-store.ts` | 一次性挑战表（工厂；TTL/上限/取即删），滑块签发与校验共用 |
 | `src/session-limits.ts` | 会话有效期档位常量（`SESSION_MAX_AGE_CHOICES` / `DEFAULT_SESSION_MAX_AGE_DAYS` / `isValidSessionMaxAgeDays`）——node 半与 browser 半共享，必须保持零依赖 |
-| `src/login-page.ts` | 自包含登录/注册页 HTML（黑白蓝风格 + brand wordmark SVG） |
-| `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码 UI），打包为 `lib/client.js` |
+| `src/login-page.ts` | 自包含登录/注册页 HTML（黑白蓝风格 + brand wordmark SVG + 人机验证控件） |
+| `src/client/index.tsx` | **前端插件**：向设置面板 `settings.section` 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码 + 会话有效期 + 人机验证开关 UI），打包为 `lib/client.js` |
 | `tsdown.config.ts` | 前端插件打包配置（`window.__ModuleLoader__.load` 格式、external 列表） |
 | `src/index.ts` | 仅类型导出（`WebStartupValues`、`AuthConfig`、`WebAuthService`） |
 | `cordis.patch.yml` | bundle patch：禁用 `web-startup`、insert 三个插件（含包根行 `dsh-web-startup-auth`，客户端扫描必需）、`connection` 注入 `webAuth` |

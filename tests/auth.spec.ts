@@ -4,12 +4,12 @@ import { createHash, createHmac } from 'node:crypto'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
 import { PassThrough } from 'node:stream'
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { chmodSync, existsSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import { credentialKey } from '@deepseek-ai/dsh-credentials'
-import { apply, type WebAuthService } from '../src/auth.ts'
+import { apply, internals as authInternals, type WebAuthService } from '../src/auth.ts'
 import {
   registerCredentials,
   signSession,
@@ -20,11 +20,16 @@ import {
   getUsername,
   getRequireLoopbackLogin,
   setRequireLoopbackLogin,
+  getSlideVerification,
+  setSlideVerification,
   getSessionMaxAgeDays,
   setSessionMaxAgeDays,
   normalizeUsername,
   validateCredentials,
+  internals,
 } from '../src/credential-store.ts'
+import { internals as sliderInternals } from '../src/slider/index.ts'
+import { MAX_ANSWER_Y, TOLERANCE } from '../src/slider/challenge.ts'
 
 let authFile: string
 let authDir: string
@@ -33,6 +38,10 @@ beforeEach(() => {
   authDir = mkdtempSync(join(tmpdir(), 'dsh-web-auth-'))
   authFile = join(authDir, 'web-auth.json')
   process.env.DSH_WEB_AUTH_FILE = authFile
+  // The limiters are module-global, so without this every test would inherit
+  // the failures of the ones before it — and the aggregate counter would trip
+  // somewhere in the middle of the file.
+  authInternals.resetLoginFailures()
 })
 
 afterEach(() => {
@@ -134,6 +143,7 @@ interface CapturedResponse {
   setCookies?: string[]
   location?: string
   contentType?: string
+  retryAfter?: string
 }
 
 function jsonResponseCapture() {
@@ -144,6 +154,7 @@ function jsonResponseCapture() {
       if (headers !== undefined) {
         if (typeof headers.location === 'string') captured.location = headers.location
         if (typeof headers['content-type'] === 'string') captured.contentType = headers['content-type']
+        if (typeof headers['retry-after'] === 'string') captured.retryAfter = headers['retry-after']
         const value = headers['set-cookie']
         if (Array.isArray(value)) {
           captured.setCookies = [...value]
@@ -311,6 +322,36 @@ describe('route wrapping coverage', () => {
     const rejected = jsonResponseCapture()
     await route.handler(httpRequest({ host: '192.168.5.216:3080', ip: '192.168.5.216' }), rejected.res)
     expect(rejected.captured.statusCode).toBe(401)
+  })
+
+  it('leaves a dynamically registered /oauth/callback anonymous', async () => {
+    // `@deepseek-ai/dsh-deepseek-account-platform` (base bundle) registers this
+    // route with `ctx.effect(...)` for the duration of one DeepSeek-account
+    // sign-in attempt. It arrives as a cross-site top-level navigation from the
+    // provider: a browser that never held our `dsh_sid` (link opened elsewhere,
+    // cookies cleared, another container) would be sent to /login and the
+    // authorization code lost with it. It must therefore stay anonymous — the
+    // route is already bound to a single-use `state` + PKCE verifier.
+    registerCredentials('admin', 'secret1')
+    const { webServer } = fakeWebAuthContext('0.0.0.0')
+    const callback: WebRoute = {
+      kind: 'exact',
+      path: '/oauth/callback',
+      handler: async (_req, res) => {
+        res.writeHead(200, { 'content-type': 'text/plain' })
+        res.end('callback reached')
+      },
+    }
+    webServer.register(callback)
+
+    // Remote caller, no session, no native cookie: still reaches upstream.
+    const reached = jsonResponseCapture()
+    await callback.handler(
+      httpRequest({ host: '192.168.5.216:3080', ip: '192.168.5.216', accept: 'text/html' }),
+      reached.res,
+    )
+    expect(reached.captured.statusCode).toBe(200)
+    expect(reached.captured.body).toBe('callback reached')
   })
 
   it('forwards a reverse-proxied caller with its public Host untouched', async () => {
@@ -929,6 +970,46 @@ describe('credential file permissions', () => {
   })
 })
 
+// ── credential file location ─────────────────────────────────────────────────
+
+describe('credential file location', () => {
+  it('lives under $DSH_HOME so a custom home stays self-contained', () => {
+    // The harness resolves its data root as `$DSH_HOME` then `~/.dsh`. Reading
+    // only the OS home made a custom-`DSH_HOME` deployment (or a second
+    // instance used for testing) share — and overwrite — the real `~/.dsh`
+    // credentials.
+    const home = mkdtempSync(join(tmpdir(), 'dsh-home-'))
+    const previousHome = process.env.DSH_HOME
+    delete process.env.DSH_WEB_AUTH_FILE
+    process.env.DSH_HOME = home
+    try {
+      expect(internals.credentialFile()).toBe(join(home, 'web-auth.json'))
+      registerCredentials('admin', 'supersecret1')
+      expect(existsSync(join(home, 'web-auth.json'))).toBe(true)
+      // The file it wrote is the one it reads back.
+      expect(internals.readCredentials()?.username).toBe('admin')
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  it('treats a blank $DSH_HOME as unset', () => {
+    // A whitespace-only override must not resolve the file against the current
+    // working directory (the harness's own `resolveDshHome` does the same).
+    const previousHome = process.env.DSH_HOME
+    delete process.env.DSH_WEB_AUTH_FILE
+    process.env.DSH_HOME = '   '
+    try {
+      expect(internals.credentialFile()).toBe(join(homedir(), '.dsh', 'web-auth.json'))
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  })
+})
+
 // ── register endpoint ────────────────────────────────────────────────────────
 
 describe('POST /api/auth/register', () => {
@@ -1354,6 +1435,251 @@ describe('requireLoopbackLogin', () => {
     setRequireLoopbackLogin(true)
     changePassword('supersecret1', 'newsecret1')
     expect(getRequireLoopbackLogin()).toBe(true)
+  })
+})
+
+// ── slider puzzle (settings-tab "人机验证") ──────────────────────────────────
+
+/** Reads the challenge endpoint the way the login page does. */
+async function fetchChallenge(routes: WebRoute[], ip: string, query = ''): Promise<Record<string, unknown>> {
+  const { captured, res } = jsonResponseCapture()
+  await findRoute(routes, '/api/auth/challenge').handler(
+    httpRequest({ method: 'GET', ip, host: 'dsh.example.com', url: `/api/auth/challenge${query}` }),
+    res,
+  )
+  return JSON.parse(captured.body) as Record<string, unknown>
+}
+
+/** A solved puzzle: the handle plus the drop only the store knows. */
+async function solvePuzzle(routes: WebRoute[], ip: string): Promise<{ id: string; answer: string }> {
+  const body = await fetchChallenge(routes, ip)
+  const id = typeof body.id === 'string' ? body.id : ''
+  const answer = sliderInternals.store.peek(id)?.payload.answer ?? { x: -1, y: -1 }
+  return { id, answer: `${answer.x},${answer.y}` }
+}
+
+describe('slider policy', () => {
+  it('is off by default, before and after registration', () => {
+    expect(getSlideVerification()).toBe(false)
+    registerCredentials('admin', 'supersecret1')
+    expect(getSlideVerification()).toBe(false)
+  })
+
+  it('refuses to enable before any admin is registered, writing nothing', () => {
+    expect(() => setSlideVerification(true)).toThrow()
+    // The credential file's *existence* is what `hasCredentials()` reads as
+    // "registered", so a file created just to hold this switch would close the
+    // registration form permanently.
+    expect(existsSync(authFile)).toBe(false)
+    // Disabling is always a no-op, never an error.
+    expect(() => setSlideVerification(false)).not.toThrow()
+    expect(existsSync(authFile)).toBe(false)
+  })
+
+  it('GET /api/auth/challenge-policy reports the current flag', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    let captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/challenge-policy').handler(
+      httpRequest({ method: 'GET', ip: '192.0.2.110', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(200)
+    expect(JSON.parse(captured.captured.body)).toEqual({ slideVerification: false })
+
+    setSlideVerification(true)
+    captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/challenge-policy').handler(
+      httpRequest({ method: 'GET', ip: '192.0.2.111', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(JSON.parse(captured.captured.body)).toEqual({ slideVerification: true })
+  })
+
+  it('rejects an unauthenticated caller flipping the switch', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/challenge-policy', { slideVerification: true }, '192.0.2.112')
+    expect(res.statusCode).toBe(401)
+    expect(getSlideVerification()).toBe(false)
+  })
+
+  it('flips the switch for an authenticated caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/challenge-policy').handler(
+      jsonRequest('POST', { slideVerification: true }, { ip: '192.0.2.113', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(200)
+    expect(getSlideVerification()).toBe(true)
+  })
+
+  it('rejects a non-boolean payload', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const captured = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/challenge-policy').handler(
+      jsonRequest('POST', { slideVerification: 'yes' }, { ip: '192.0.2.114', host: 'dsh.example.com', cookie: sessionCookie('admin') }),
+      captured.res,
+    )
+    expect(captured.captured.statusCode).toBe(400)
+    expect(getSlideVerification()).toBe(false)
+  })
+
+  it('preserves the flag across a password change', () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    changePassword('supersecret1', 'newsecret1')
+    expect(getSlideVerification()).toBe(true)
+  })
+})
+
+describe('GET /api/auth/challenge', () => {
+  it('answers enabled:false while the switch is off', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    // No cookie: the login page calls this before it has any session.
+    expect(await fetchChallenge(routes, '192.0.2.115')).toEqual({ enabled: false })
+  })
+
+  it('issues an anonymous puzzle bound to the caller', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const body = await fetchChallenge(routes, '192.0.2.116')
+    expect(body.enabled).toBe(true)
+    expect(String(body.id)).toMatch(/^[0-9a-f]{32}$/)
+    expect(String(body.background).startsWith('data:image/svg+xml;base64,')).toBe(true)
+    expect(String(body.piece).startsWith('data:image/svg+xml;base64,')).toBe(true)
+    // Geometry travels with the puzzle so the page hardcodes nothing.
+    expect(body.width).toBe(300)
+    expect(body.height).toBe(150)
+    expect(typeof body.pieceWidth).toBe('number')
+    expect(typeof body.pieceHeight).toBe('number')
+    expect(typeof body.startX).toBe('number')
+    expect(typeof body.startY).toBe('number')
+    expect(typeof body.tolerance).toBe('number')
+    // The piece never starts within a drop of the slot's row: lining it up is
+    // real work on both axes.
+    expect(Number(body.startY) - MAX_ANSWER_Y).toBeGreaterThan(TOLERANCE)
+    expect(Number(body.startX)).toBeLessThan(96)
+    expect(sliderInternals.store.peek(String(body.id))?.clientKey).toBe('192.0.2.116')
+  })
+
+  it('renders for the theme the page asks for', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const body = await fetchChallenge(routes, '192.0.2.117', '?theme=dark')
+    const svg = Buffer.from(String(body.background).split(',')[1] ?? '', 'base64').toString('utf8')
+    expect(svg).toContain('#42557d')
+  })
+
+  it('rejects anything but GET', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/challenge').handler(
+      httpRequest({ method: 'POST', ip: '192.0.2.118', host: 'dsh.example.com' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(405)
+  })
+})
+
+describe('login with the slider puzzle on', () => {
+  it('refuses a login that carries no puzzle', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, '192.0.2.130')
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body)).toMatchObject({ challengeExpired: true })
+    // The right password bought nothing, and no session was minted.
+    expect(res.setCookie).toBeUndefined()
+  })
+
+  it('accepts a login that solves the puzzle', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ip = '192.0.2.131'
+    const solved = await solvePuzzle(routes, ip)
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1', challengeId: solved.id, challengeAnswer: solved.answer }, ip)
+    expect(res.statusCode).toBe(200)
+    expect(res.setCookie?.startsWith('dsh_sid=')).toBe(true)
+  })
+
+  it('refuses a drop that misses the slot', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ip = '192.0.2.132'
+    const body = await fetchChallenge(routes, ip)
+    const answer = sliderInternals.store.peek(String(body.id))?.payload.answer ?? { x: 0, y: 0 }
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1', challengeId: body.id, challengeAnswer: `${answer.x + 60},${answer.y}` }, ip)
+    expect(res.statusCode).toBe(400)
+    expect(res.setCookie).toBeUndefined()
+  })
+
+  it('refuses a drop reported from another address', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const solved = await solvePuzzle(routes, '192.0.2.133')
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1', challengeId: solved.id, challengeAnswer: solved.answer }, '192.0.2.134')
+    expect(res.statusCode).toBe(400)
+    expect(JSON.parse(res.body)).toMatchObject({ challengeExpired: true })
+  })
+
+  it('burns the puzzle, so one solve buys one attempt', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ip = '192.0.2.135'
+    const solved = await solvePuzzle(routes, ip)
+    const first = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1', challengeId: solved.id, challengeAnswer: solved.answer }, ip)
+    expect(first.statusCode).toBe(200)
+    // Same (valid) drop again: the puzzle is gone.
+    const replay = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1', challengeId: solved.id, challengeAnswer: solved.answer }, ip)
+    expect(replay.statusCode).toBe(400)
+    expect(replay.setCookie).toBeUndefined()
+  })
+
+  it('counts a missed drop against the login lockout', async () => {
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const ip = '192.0.2.136'
+    for (let i = 0; i < 5; i += 1) {
+      const solved = await solvePuzzle(routes, ip)
+      const missed = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1', challengeId: solved.id, challengeAnswer: '0,0' }, ip)
+      expect(missed.statusCode).toBe(400)
+    }
+    // Five missed puzzles is five failures: the correct password is locked out.
+    const solved = await solvePuzzle(routes, ip)
+    const locked = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1', challengeId: solved.id, challengeAnswer: solved.answer }, ip)
+    expect(locked.statusCode).toBe(429)
+  })
+
+  it('gates a loopback caller too', async () => {
+    // The switch is about the credential check, not the peer address: an
+    // attacker running on the host is exactly who a loopback exemption would
+    // let through.
+    registerCredentials('admin', 'supersecret1')
+    setSlideVerification(true)
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, '127.0.0.1')
+    expect(res.statusCode).toBe(400)
+  })
+
+  it('leaves the login endpoint alone while the switch is off', async () => {
+    registerCredentials('admin', 'supersecret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0')
+    const res = await callEndpoint(routes, '/api/auth/login', { username: 'admin', password: 'supersecret1' }, '192.0.2.137')
+    expect(res.statusCode).toBe(200)
   })
 })
 

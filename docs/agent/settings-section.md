@@ -22,15 +22,15 @@ DSH 的 SPA 本身就是一组「前端插件」——后端 `ClientModuleRegist
 
 **开启成功且当前无会话时直接跳 `/login`**：那一刻本浏览器的隐式信任已经撤掉，SPA 里所有受保护 RPC 都在 401，只刷新卡片等于留个半死的界面。账号卡因此是**四态**：`signedIn`（退出按钮）/ 免登录（`trusted === true`，说明文案、无按钮）/ 未登录且不受信（`前往登录` 按钮）/ **未知**（见下条）。
 
-## 标签页的三个读都必须预取，且读不到时不得拿默认值充数（浏览器实测 2026-09-16）
+## 标签页的四个读都必须预取，且读不到时不得拿默认值充数（浏览器实测 2026-09-16）
 
-认证页读三处后端状态——`/api/auth/status`（账号卡）、`/api/auth/policy`（登录要求开关）、`/api/auth/session-max-age`（有效期档位）。它们原本都在**面板挂载时**才发请求，于是出生在 SPA 启动请求波的正中间，要和其余请求抢同源 6 条连接。实测（资源计时）：请求自身只要 4-8ms（stalled 1ms + TTFB 2-5ms）、干净实例最慢的启动请求 74ms，但用户实机（会话/插件/工作区数据量大得多）会看到认证页停在「正在读取登录状态…」**十几秒**——等待不来自请求本身，而来自它排队的时机。
+认证页读四处后端状态——`/api/auth/status`（账号卡）、`/api/auth/policy`（登录要求开关）、`/api/auth/session-max-age`（有效期档位）、`/api/auth/challenge-policy`（拼图验证开关）。它们原本都在**面板挂载时**才发请求，于是出生在 SPA 启动请求波的正中间，要和其余请求抢同源 6 条连接。实测（资源计时）：请求自身只要 4-8ms（stalled 1ms + TTFB 2-5ms）、干净实例最慢的启动请求 74ms，但用户实机（会话/插件/工作区数据量大得多）会看到认证页停在「正在读取登录状态…」**十几秒**——等待不来自请求本身，而来自它排队的时机。
 
 修复分两半：
 
-**① 预取**：`startPrefetch` 通用工具在模块顶层（bundle 初始化执行模块体时）就发起读并缓存（`inflight` + settle 后的 `settled`），交给首个挂载的标签页**一次性消费**（`useState` 惰性初值）。实测三个请求都在 ~433ms 发出、面板打开**不新增请求**、首帧即正确（开关直接是 ON、账号卡直接是「当前登录：admin」）；重挂载与 `refresh()` 一律新发请求（实测关面板再开、翻转开关各新增 1 条），陈旧结果不会被当成当前状态。
+**① 预取**：`startPrefetch` 通用工具在模块顶层（bundle 初始化执行模块体时）就发起读并缓存（`inflight` + settle 后的 `settled`），交给首个挂载的标签页**一次性消费**（`useState` 惰性初值）。实测三个请求都在 ~433ms 发出、面板打开**不新增请求**、首帧即正确（开关直接是 ON、账号卡直接是「当前登录：admin」）；重挂载与 `refresh()` 一律新发请求（实测关面板再开、翻转开关各新增 1 条），陈旧结果不会被当成当前状态。**新增读（如拼图验证开关）必须照这个模式加**：`readSlideVerification` + `takeSlideVerificationPrefetch` + 一个 `undefined` 表未知的 hook，不要退回挂载时请求。
 
-**② 未知态不用默认值充数**：policy/session-max-age 的 state 类型是 `boolean | undefined` / `number | undefined`，**`undefined` = 没读到**：开关此时 `disabled` + 半透明 + 文案「正在读取登录要求…」，档位显示「正在读取…」。**绝不能拿 `useState` 的默认值（`false` / 14 天）当渲染值**——那会让「实际已打开」的开关显示成关闭（用户实测反馈；本地复现：开关先 OFF 117ms 再 ON，实机则是十几秒），status 侧同理只走 `statusUnknown` / `failed` 两态。
+**② 未知态不用默认值充数**：policy/session-max-age/challenge-policy 的 state 类型是 `boolean | undefined` / `number | undefined`，**`undefined` = 没读到**：开关此时 `disabled` + 半透明 + 文案「正在读取登录要求…」/「正在读取设置…」，档位显示「正在读取…」。**绝不能拿 `useState` 的默认值（`false` / 14 天）当渲染值**——那会让「实际已打开」的开关显示成关闭（用户实测反馈；本地复现：开关先 OFF 117ms 再 ON，实机则是十几秒），status 侧同理只走 `statusUnknown` / `failed` 两态。
 
 **观察哨**：预取依赖「client bundle 被加载时即执行模块体」（tsdown 的 `__ModuleLoader__.load` 语义）——上游若改成惰性/按需执行 client bundle，预取会退化成挂载时请求（功能不受影响，只是等待回来）。
 

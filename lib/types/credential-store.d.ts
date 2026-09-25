@@ -2,8 +2,8 @@
  * File-based credential store for the auth plugin.
  *
  * Stores username, password hash, and session HMAC secret in
- * `~/.dsh/web-auth.json`. Created on first registration; read on every
- * authentication and session-verification.
+ * `$DSH_HOME/web-auth.json` (`~/.dsh/web-auth.json` by default). Created on
+ * first registration; read on every authentication and session-verification.
  */
 /** Minimum password length for registration and the CLI password reset. */
 export declare const MIN_PASSWORD_LENGTH = 8;
@@ -18,6 +18,7 @@ export declare const MIN_PASSWORD_LENGTH = 8;
  * @returns the sanitized username (possibly empty).
  */
 export declare function normalizeUsername(raw: string): string;
+/** The persisted credential file (overridable via DSH_WEB_AUTH_FILE for tests). */
 declare function credentialFile(): string;
 /** In-memory snapshot of the credential file (re-read on every auth). */
 interface CredentialFile {
@@ -31,6 +32,8 @@ interface CredentialFile {
     requireLoopbackLogin?: boolean;
     /** Admin-selected session lifetime in days (see session-limits.ts). */
     sessionMaxAgeDays?: number;
+    /** When true, the login endpoint also demands a solved slider puzzle. */
+    slideVerification?: boolean;
 }
 /** Hash a password with a salt using scrypt. */
 declare function hashPassword(password: string, salt: string): string;
@@ -111,6 +114,29 @@ export declare function getRequireLoopbackLogin(): boolean;
  * @throws when no credentials exist yet and `value` is `true`.
  */
 export declare function setRequireLoopbackLogin(value: boolean): void;
+/**
+ * Whether the login endpoint demands a solved slider puzzle.
+ *
+ * Defaults to `false`. The puzzle is decorative (see `src/slider/index.ts`),
+ * so this is off unless someone turns it on for fun — but it still costs a
+ * real step on every login, which is why it is never on by default.
+ * @returns the persisted flag; `false` before registration.
+ */
+export declare function getSlideVerification(): boolean;
+/**
+ * Persist the slider-puzzle requirement.
+ *
+ * Refuses to enable the switch before any admin account exists, for the same
+ * mechanical reason as {@link setRequireLoopbackLogin}: this flag lives in the
+ * credential file, and that file's mere existence is what `hasCredentials()`
+ * reads as "an administrator is registered". Writing one to hold a switch
+ * would therefore make the registration form unreachable — the first admin
+ * could never be created. Disabling is always allowed (and is a no-op with no
+ * file to write).
+ * @param value - the new flag value.
+ * @throws when no credentials exist yet and `value` is `true`.
+ */
+export declare function setSlideVerification(value: boolean): void;
 /**
  * The configured session lifetime, in days.
  *

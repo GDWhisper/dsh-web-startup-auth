@@ -41,6 +41,7 @@ import { credentialKey } from '@deepseek-ai/dsh-credentials'
 import { isValidSessionMaxAgeDays, SESSION_MAX_AGE_CHOICES } from './session-limits.ts'
 import { WEB_STARTUP_SERVICE } from './startup.ts'
 import { LOGIN_PAGE_HTML } from './login-page.ts'
+import { issueSlider, parseSliderTheme, verifySlider } from './slider/index.ts'
 import {
   hasCredentials,
   registerCredentials,
@@ -53,6 +54,8 @@ import {
   getUsername,
   getRequireLoopbackLogin,
   setRequireLoopbackLogin,
+  getSlideVerification,
+  setSlideVerification,
   getSessionMaxAgeDays,
   setSessionMaxAgeDays,
   normalizeUsername,
@@ -109,6 +112,48 @@ const LOCKOUT_MS = 30_000
 /** Rolling window in which failures count towards a lockout. */
 const FAILURE_TRACKING_WINDOW_MS = 10 * 60_000
 
+/**
+ * Failures **across all clients** tolerated before any global penalty applies.
+ *
+ * The per-client limit above is the wrong shape for a distributed attack: a
+ * botnet with a thousand addresses never trips it, because each address only
+ * ever tries a handful of times. This counter is what makes the aggregate
+ * volume cost something.
+ *
+ * The free allowance exists because a single administrator fat-fingering a
+ * password, or a handful of users behind one NAT, must never meet a penalty.
+ */
+const GLOBAL_FREE_FAILURES = 20
+
+/** Additional failures that buy each further backoff step. */
+const GLOBAL_FAILURES_PER_STEP = 10
+
+/** The first global penalty (the step before it is zero). */
+const GLOBAL_BACKOFF_BASE_MS = 5_000
+
+/**
+ * Ceiling on the global penalty.
+ *
+ * This is also the worst case an attacker can inflict on the administrator by
+ * flooding the login endpoint: a deliberate availability attack is possible
+ * with any global limiter, so the penalty is bounded rather than unbounded,
+ * and a genuine loopback caller is exempt (see {@link isGlobalLockoutExempt}).
+ */
+const GLOBAL_BACKOFF_MAX_MS = 5 * 60_000
+
+/** Window over which global failures accumulate before they decay. */
+const GLOBAL_FAILURE_WINDOW_MS = 60 * 60_000
+
+/**
+ * One message for every slider rejection.
+ *
+ * Deliberately does not distinguish "misaligned" from "expired": the
+ * difference is an oracle for someone probing the challenge lifecycle, while a
+ * solver only needs to know they must fetch a new puzzle. The reason is
+ * logged instead.
+ */
+const CHALLENGE_REJECTED = '拼图没有对上，请再试一次'
+
 /** Per-client login failure tracking (memory only; keyed by socket address). */
 interface LoginFailure {
   count: number
@@ -118,6 +163,31 @@ interface LoginFailure {
 
 const loginFailures = new Map<string, LoginFailure>()
 
+/** Aggregate failure pressure across every client (memory only). */
+let globalFailures: { count: number; firstAt: number } | undefined
+
+/** When the current global penalty lapses. */
+let globalLockedUntil = 0
+
+/**
+ * @internal Test-only: forget every failure the limiter has recorded.
+ *
+ * The limiters are module-global (that is the point — a per-process view is
+ * what makes the aggregate counter work), so a test that exercises them would
+ * otherwise leak its failures into every later test in the same file. Tests
+ * call this in `beforeEach` instead of relying on picking unused addresses.
+ */
+export const internals = {
+  /** Clear both the per-client map and the aggregate counter. */
+  resetLoginFailures(): void {
+    loginFailures.clear()
+    globalFailures = undefined
+    globalLockedUntil = 0
+  },
+  /** The aggregate penalty for a given failure count (pure, for exact checks). */
+  globalBackoffMs,
+}
+
 /**
  * Client socket address for rate limiting and audit logs.
  * Deliberately NOT the `X-Forwarded-For` header, which clients can forge.
@@ -126,17 +196,95 @@ function clientIp(req: IncomingMessage): string | undefined {
   return req.socket?.remoteAddress
 }
 
+/**
+ * A query parameter from the request URL.
+ *
+ * Read off `req.url` rather than a parsed URL object: the webserver hands the
+ * handler the raw request target, and the only caller here wants a single
+ * presentation hint.
+ * @param req - the incoming request.
+ * @param name - the parameter to read.
+ * @returns the first value, or `null` when absent.
+ */
+function queryParam(req: IncomingMessage, name: string): string | null {
+  const url = req.url
+  if (url === undefined) return null
+  const start = url.indexOf('?')
+  if (start === -1) return null
+  return new URLSearchParams(url.slice(start + 1)).get(name)
+}
+
 /** Whether this client is currently locked out of the login endpoint. */
 function isLockedOut(req: IncomingMessage): boolean {
   const entry = loginFailures.get(clientIp(req) ?? '')
   return entry?.lockedUntil !== undefined && entry.lockedUntil > Date.now()
 }
 
+/**
+ * The global penalty for a given aggregate failure count: zero up to the free
+ * allowance, then doubling per step, capped.
+ * @param failures - failures recorded in the current window.
+ * @returns the penalty in milliseconds.
+ */
+function globalBackoffMs(failures: number): number {
+  if (failures < GLOBAL_FREE_FAILURES) return 0
+  const step = Math.floor((failures - GLOBAL_FREE_FAILURES) / GLOBAL_FAILURES_PER_STEP)
+  return Math.min(GLOBAL_BACKOFF_MAX_MS, GLOBAL_BACKOFF_BASE_MS * 2 ** step)
+}
+
+/**
+ * Whether the caller is exempt from the **global** penalty.
+ *
+ * A genuine loopback caller — peer address *and* `Host` both loopback, with the
+ * loopback-login switch off — is already authorized without logging in, so
+ * penalizing it protects nothing and would hand an attacker a way to lock the
+ * administrator out of their own machine. With the switch on, loopback is
+ * treated like any other address and the penalty applies.
+ * @param req - the incoming request.
+ * @returns `true` when the global penalty must not apply.
+ */
+function isGlobalLockoutExempt(req: IncomingMessage): boolean {
+  return isTrustedOrigin(req)
+}
+
+/**
+ * Whether the aggregate failure pressure currently blocks this caller.
+ * @param req - the incoming request.
+ * @returns `true` when the caller must wait.
+ */
+function isGloballyLockedOut(req: IncomingMessage): boolean {
+  if (globalLockedUntil <= Date.now()) return false
+  return !isGlobalLockoutExempt(req)
+}
+
+/**
+ * Milliseconds until this caller may retry, for the `Retry-After` header.
+ * @param req - the incoming request.
+ * @returns whole seconds, or `undefined` when nothing is blocking.
+ */
+function retryAfterSeconds(req: IncomingMessage): number | undefined {
+  const now = Date.now()
+  const local = loginFailures.get(clientIp(req) ?? '')?.lockedUntil ?? 0
+  const until = Math.max(local, isGlobalLockoutExempt(req) ? 0 : globalLockedUntil)
+  if (until <= now) return undefined
+  return Math.max(1, Math.ceil((until - now) / 1000))
+}
+
 /** Record a failed login; locks the client out after repeated failures. */
 function recordLoginFailure(req: IncomingMessage): void {
+  const now = Date.now()
+  // Aggregate pressure first: it applies even when the peer address is
+  // unreadable, which is exactly the case a per-client map cannot cover.
+  if (globalFailures === undefined || now - globalFailures.firstAt > GLOBAL_FAILURE_WINDOW_MS) {
+    globalFailures = { count: 1, firstAt: now }
+  } else {
+    globalFailures.count += 1
+  }
+  const penalty = globalBackoffMs(globalFailures.count)
+  if (penalty > 0) globalLockedUntil = now + penalty
+
   const ip = clientIp(req)
   if (ip === undefined) return
-  const now = Date.now()
   const entry = loginFailures.get(ip)
   if (entry === undefined || now - entry.firstAt > FAILURE_TRACKING_WINDOW_MS) {
     loginFailures.set(ip, { count: 1, firstAt: now })
@@ -152,6 +300,10 @@ function recordLoginFailure(req: IncomingMessage): void {
 function recordLoginSuccess(req: IncomingMessage): void {
   const ip = clientIp(req)
   if (ip !== undefined) loginFailures.delete(ip)
+  // Deliberately does NOT clear `globalFailures`: one administrator getting in
+  // does not mean the aggregate pressure ended, and a successful login is
+  // something only a holder of the password can produce. The counter decays by
+  // window instead, and the penalty is capped, so this cannot strand anyone.
 }
 
 /**
@@ -159,6 +311,10 @@ function recordLoginSuccess(req: IncomingMessage): void {
  * when attackers spoof socket addresses from many sources.
  */
 function pruneLoginFailures(now = Date.now()): void {
+  if (globalFailures !== undefined && now - globalFailures.firstAt > GLOBAL_FAILURE_WINDOW_MS) {
+    globalFailures = undefined
+    globalLockedUntil = 0
+  }
   if (loginFailures.size < 1024) return
   for (const [ip, entry] of loginFailures) {
     if (now - entry.firstAt > FAILURE_TRACKING_WINDOW_MS) {
@@ -261,9 +417,39 @@ function isAlreadyRegistered(error: unknown): boolean {
 }
 
 /** Send a JSON response. */
-function jsonResponse(res: ServerResponse, status: number, data: Record<string, unknown>): void {
-  res.writeHead(status, { 'content-type': 'application/json' })
+/**
+ * Send a JSON answer.
+ * @param res - the response to write to.
+ * @param status - the HTTP status.
+ * @param data - the JSON body.
+ * @param headers - extra headers (e.g. `retry-after`).
+ */
+function jsonResponse(
+  res: ServerResponse,
+  status: number,
+  data: Record<string, unknown>,
+  headers: Record<string, string> = {},
+): void {
+  res.writeHead(status, { 'content-type': 'application/json', ...headers })
   res.end(JSON.stringify(data))
+}
+
+/**
+ * Answer a rate-limited caller, telling them how long to wait.
+ *
+ * The `Retry-After` header is the standard signal and the only one a scripted
+ * client will notice; the JSON body keeps the message the login page shows.
+ * @param req - the incoming request.
+ * @param res - the response to write to.
+ */
+function rateLimitedResponse(req: IncomingMessage, res: ServerResponse): void {
+  const retryAfter = retryAfterSeconds(req)
+  jsonResponse(
+    res,
+    429,
+    { error: '尝试次数过多，请稍后再试' },
+    retryAfter === undefined ? {} : { 'retry-after': String(retryAfter) },
+  )
 }
 
 /**
@@ -666,9 +852,14 @@ export function apply(ctx: Context, _config: Config): void {
         }
         try {
           pruneLoginFailures()
-          if (isLockedOut(req)) {
-            ctx.logger.warn('web-auth: login rate-limited (from %s)', clientIp(req) ?? 'unknown')
-            jsonResponse(res, 429, { error: '尝试次数过多，请稍后再试' })
+          const globalBackoff = isGloballyLockedOut(req)
+          if (isLockedOut(req) || globalBackoff) {
+            ctx.logger.warn(
+              'web-auth: login rate-limited (%s, from %s)',
+              globalBackoff ? 'global backoff' : 'client lockout',
+              clientIp(req) ?? 'unknown',
+            )
+            rateLimitedResponse(req, res)
             return
           }
           const body = await parseBody(req)
@@ -677,6 +868,29 @@ export function apply(ctx: Context, _config: Config): void {
           if (!username || !password) {
             jsonResponse(res, 400, { error: '请输入用户名和密码' })
             return
+          }
+          // The puzzle sits in front of the credential check, and a rejection
+          // is counted as a login failure: that is what ties solving it to the
+          // limiters above (a wrong drop costs a fresh puzzle *and* one of the
+          // five attempts).
+          if (getSlideVerification()) {
+            const verdict = verifySlider(
+              clientIp(req),
+              typeof body.challengeId === 'string' ? body.challengeId : '',
+              typeof body.challengeAnswer === 'string' ? body.challengeAnswer : '',
+            )
+            if (!verdict.ok) {
+              recordLoginFailure(req)
+              ctx.logger.warn(
+                'web-auth: slider rejected (%s, from %s)',
+                verdict.reason,
+                clientIp(req) ?? 'unknown',
+              )
+              // `challengeExpired` is the page's cue to fetch a new puzzle: the
+              // challenge was consumed by this attempt, whatever the reason.
+              jsonResponse(res, 400, { error: CHALLENGE_REJECTED, challengeExpired: true })
+              return
+            }
           }
           if (!validateCredentials(username, password)) {
             recordLoginFailure(req)
@@ -741,7 +955,7 @@ export function apply(ctx: Context, _config: Config): void {
             return
           }
           if (isLockedOut(req)) {
-            jsonResponse(res, 429, { error: '尝试次数过多，请稍后再试' })
+            rateLimitedResponse(req, res)
             return
           }
           const body = await parseBody(req)
@@ -813,7 +1027,7 @@ export function apply(ctx: Context, _config: Config): void {
             return
           }
           if (isLockedOut(req)) {
-            jsonResponse(res, 429, { error: '尝试次数过多，请稍后再试' })
+            rateLimitedResponse(req, res)
             return
           }
           const body = await parseBody(req)
@@ -967,6 +1181,84 @@ export function apply(ctx: Context, _config: Config): void {
         }
       },
     },
+    {
+      kind: 'exact',
+      path: '/api/auth/challenge',
+      handler: (req, res) => {
+        // Anonymous on purpose: the login page calls this before it holds any
+        // session, so requiring one would make the puzzle unusable. It answers
+        // `{ enabled: false }` while the switch is off, and otherwise hands out
+        // nothing but a fresh puzzle — no credential, no state the caller did
+        // not just create.
+        //
+        // Not rate-limited either: the store is bounded (`MAX_CHALLENGES`),
+        // and folding this into the login limiter would hand an attacker a way
+        // to lock the administrator out by spamming an endpoint that needs no
+        // credentials at all.
+        if (req.method !== 'GET') {
+          res.writeHead(405)
+          res.end()
+          return
+        }
+        if (!getSlideVerification()) {
+          jsonResponse(res, 200, { enabled: false })
+          return
+        }
+        const issued = issueSlider(clientIp(req), parseSliderTheme(queryParam(req, 'theme')))
+        jsonResponse(res, 200, { enabled: true, ...issued })
+      },
+    },
+    {
+      kind: 'exact',
+      path: '/api/auth/challenge-policy',
+      handler: async (req, res) => {
+        // Reading and flipping the switch requires an authenticated caller,
+        // mirroring the loopback policy endpoint: a session cookie for a
+        // remote caller, or the implicit trust of a genuine loopback request
+        // while the loopback switch itself is still off.
+        try {
+          if (!isAuthorized(req)) {
+            jsonResponse(res, 401, { error: '未登录或会话已过期' })
+            return
+          }
+          if (req.method === 'GET') {
+            jsonResponse(res, 200, { slideVerification: getSlideVerification() })
+            return
+          }
+          if (req.method !== 'POST') {
+            res.writeHead(405)
+            res.end()
+            return
+          }
+          const body = await parseBody(req)
+          const slideVerification = body.slideVerification
+          if (typeof slideVerification !== 'boolean') {
+            jsonResponse(res, 400, { error: 'slideVerification 必须为布尔值' })
+            return
+          }
+          try {
+            setSlideVerification(slideVerification)
+          } catch (error) {
+            // Enabling before any admin exists would write the credential file
+            // to hold a switch, and that file's existence is what marks the
+            // administrator as registered — the registration form would then
+            // refuse to create one.
+            ctx.logger.warn('web-auth: challenge policy update failed: %s', error instanceof Error ? error.message : String(error))
+            jsonResponse(res, 400, { error: '请先注册管理员账号，再开启拼图验证' })
+            return
+          }
+          ctx.logger.info('web-auth: slideVerification set to %s (from %s)', slideVerification, clientIp(req) ?? 'unknown')
+          jsonResponse(res, 200, { ok: true, slideVerification: getSlideVerification() })
+        } catch (error) {
+          if (isBodyTooLarge(error)) {
+            jsonResponse(res, 413, { error: '请求体过大' })
+            return
+          }
+          ctx.logger.warn('web-auth: challenge-policy endpoint failed: %s', error instanceof Error ? error.message : String(error))
+          jsonResponse(res, 500, { error: '服务器内部错误' })
+        }
+      },
+    },
   ]
 
   for (const route of authEndpoints) {
@@ -1075,9 +1367,22 @@ export function apply(ctx: Context, _config: Config): void {
   const wrappedHandlers = new WeakSet<WebRoute>()
   const wrappedUpgrades = new WeakSet<WebUpgradeRoute>()
   const wrappedFallbacks = new WeakSet<WebRoute['handler']>()
-  /** Routes that must stay anonymous: the login page and our own auth API. */
+  /**
+   * Routes that must stay anonymous: the login page, our own auth API, and
+   * upstream's DeepSeek-account OAuth callback.
+   *
+   * The callback is registered by `@deepseek-ai/dsh-deepseek-account-platform`
+   * (base bundle) for the duration of one sign-in attempt, at
+   * `${origin}/oauth/callback`. It arrives as a cross-site top-level
+   * navigation from the provider: our `dsh_sid` is `SameSite=Lax` so it
+   * survives that hop, but a browser that never held the session (link opened
+   * elsewhere, cookies cleared, a different container) would be redirected to
+   * `/login` and the authorization code lost with it. The route is bound to a
+   * single-use `state` + PKCE verifier held in memory and exists only while an
+   * attempt is in flight, so leaving it anonymous adds no reachable surface.
+   */
   const isPublicRoute = (path: string): boolean =>
-    path === '/login' || path.startsWith('/api/auth/')
+    path === '/login' || path === '/oauth/callback' || path.startsWith('/api/auth/')
 
   /** Wrap a protected request handler with the session check + minting hop. */
   const protect = (handler: (req: IncomingMessage, res: ServerResponse) => void | Promise<void>) =>

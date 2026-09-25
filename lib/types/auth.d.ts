@@ -57,8 +57,30 @@ export interface WebAuthService {
     authenticate(request: IncomingMessage): boolean;
 }
 /**
+ * @internal Test-only: forget every failure the limiter has recorded.
+ *
+ * The limiters are module-global (that is the point — a per-process view is
+ * what makes the aggregate counter work), so a test that exercises them would
+ * otherwise leak its failures into every later test in the same file. Tests
+ * call this in `beforeEach` instead of relying on picking unused addresses.
+ */
+export declare const internals: {
+    /** Clear both the per-client map and the aggregate counter. */
+    resetLoginFailures(): void;
+    /** The aggregate penalty for a given failure count (pure, for exact checks). */
+    globalBackoffMs: typeof globalBackoffMs;
+};
+/**
+ * The global penalty for a given aggregate failure count: zero up to the free
+ * allowance, then doubling per step, capped.
+ * @param failures - failures recorded in the current window.
+ * @returns the penalty in milliseconds.
+ */
+declare function globalBackoffMs(failures: number): number;
+/**
  * Install the auth policy after the web server has bound.
  * @param ctx - plugin context with `webServer` and `webStartup`.
  * @param config - resolved plugin config.
  */
 export declare function apply(ctx: Context, _config: Config): void;
+export {};
