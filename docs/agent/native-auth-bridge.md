@@ -2,7 +2,7 @@
 
 > 两个针对 dsh 0.1.2+ 上游机制的前端/补签适配。升级 dsh 后必须先 diff `packages/client/connection/src/browser-auth.ts`（本文件是对它的精确镜像）。
 
-## 原生浏览器认证桥接（dsh 0.1.2 起，当前基线 0.1.5，替代旧「特权 API 回环放行」）
+## 原生浏览器认证桥接（dsh 0.1.2 起，当前基线 0.1.7-rc.1，替代旧「特权 API 回环放行」）
 
 0.1.2 上游自带浏览器认证（`packages/client/connection/src/browser-auth.ts`）：`/api` 闸门 = 信任围栏（`isTrustedApiRequest`，403）+ 原生签名 cookie 检查（`isAuthenticated`，401），`index.html` 也被 `authorizeIndex` 把守，**无回环豁免**（回环也要原生 cookie）。旧版靠「Host/Origin 改写绕过 `PRIVILEGED_METHODS`」的靶子（`PRIVILEGED_METHODS` 与 `authority:"loopback"` channel）**已被上游删除**——改写若还在反而自伤（原生按改写后 authority 找 cookie 名必 401），故 0.1.2 迁移时整段删除。
 

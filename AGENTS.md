@@ -32,7 +32,7 @@ dsh --profile web auth-reset [--password <pwd>] [--username <name>]   # 重设�
 
 卸载：`dsh plugin --profile web remove dsh-web-startup-auth`。
 
-部署后验证：浏览器访问 `http://<主机IP>:<端口>/` → 首次显示注册页（设置管理员账号密码），之后显示登录页；未登录访问 `/api/*` 返回 401。忘记密码的两个恢复路径：`auth-reset`（推荐，轮换密钥使旧会话失效），或删除 `~/.dsh/web-auth.json` 重启后重新注册。
+部署后验证：浏览器访问 `http://<主机IP>:<端口>/` → 首次显示注册页（设置管理员账号密码），之后显示登录页；未登录访问 `/api/*` 返回 401。忘记密码的两个恢复路径：`auth-reset`（推荐，轮换密钥使旧会话失效），或删除凭据文件（`$DSH_HOME/web-auth.json`，默认 `~/.dsh/web-auth.json`）重启后重新注册。
 
 ## 红线（改这些前先读对应文档）
 
@@ -56,7 +56,7 @@ dsh --profile web auth-reset [--password <pwd>] [--username <name>]   # 重设�
 | 改登录/会话/凭据/信任判定/路由保护/auth-reset/登录页 | `docs/agent/auth-mechanics.md` |
 | 改滑块拼图验证、登录限流（每 IP + 全局退避） | `docs/agent/human-verification.md` |
 | 改原生 cookie 补签、`__DSH_TRANSPORT__` hook、升级 dsh 后的适配 | `docs/agent/native-auth-bridge.md`（升级先看 `docs/upgrade-dsh-0.1.2-playbook.md` / `docs/upgrade-dsh-0.1.5-playbook.md` / `docs/upgrade-dsh-0.1.7-playbook.md` 的观察哨，第一步 diff `browser-auth.ts`） |
-| 正式版发布前确认插件是否还活着 | `docs/upgrade-dsh-0.1.7-playbook.md`（0.1.7-rc.1 三层验证：静态 diff + 构建探针 + 隔离实例实机；含待跟进 P1 `/oauth/callback`、P2 `$DSH_HOME`） |
+| 正式版发布前确认插件是否还活着 | `docs/upgrade-dsh-0.1.7-playbook.md`（0.1.7-rc.1 三层验证：静态 diff + 构建探针 + 隔离实例实机 + 已发布产物复核；P1 `/oauth/callback`、P2 `$DSH_HOME` **已随 v0.1.11 修复**） |
 | 改设置面板「认证」标签页、slot 注册、导航图标、暗黑模式、预取与状态未知态 | `docs/agent/settings-section.md` |
 | 处理 Renovate 依赖更新 PR | `docs/agent/renovate.md` |
 | 发版 | `docs/release-guide.md` |
@@ -80,6 +80,7 @@ dsh --profile web auth-reset [--password <pwd>] [--username <name>]   # 重设�
 ## 作者本机环境（仅对作者本机成立）
 
 - profile 现状（作者本机）：`~/.dsh/profiles/web/` 以 `link:` 方式安装本插件（指向作者本机的仓库路径）；`dsh.profile.bundles` 含 `dsh-web-startup-auth`。改动后重启 `dsh web` 生效。
-- 版本跟进基线：README 声明跟进官方 `next` dist-tag（不跟 `alpha`）。当前基线 dsh 0.1.5-rc.2（0.1.5-rc.1 适配核查见 `docs/upgrade-dsh-0.1.5-playbook.md`，rc.2 经产物对比与 rc.1 零代码差异；0.1.2 迁移手册见 `docs/upgrade-dsh-0.1.2-playbook.md`）。
+- 版本跟进基线：README 声明跟进官方 `next` dist-tag（不跟 `alpha`）。**当前基线 dsh 0.1.7-rc.1**（依赖 5 个 `@deepseek-ai/dsh-*` 已 bump 到 `^0.1.7-rc.1`；0.1.7 核查与迁移见 `docs/upgrade-dsh-0.1.7-playbook.md`，0.1.5 手册见 `docs/upgrade-dsh-0.1.5-playbook.md`，0.1.2 迁移手册见 `docs/upgrade-dsh-0.1.2-playbook.md`）。
 - **正式版前置核查（2026-09-23）**：harness 源码已拉到 `dsh-v0.1.7-rc.1`（`next` 指向它，`latest` = 0.1.5-rc.3）。核查结论 = **插件存活、源码零改动**，且依赖是 caret 范围（稳定版一发布就会被 `npm install` 解析进来），故已在 0.1.7-rc.1 上完成构建探针 + 隔离实例实机验证。完整证据、待跟进项与迁移清单见 `docs/upgrade-dsh-0.1.7-playbook.md`。
 - **第二次核查（2026-09-24）**：针对 npm 已发布产物（而非仅源码 tag）复核，结论不变（101/101、dump-config、登录墙/补签/登出/`auth-reset`/设置面板「认证」页全部实测通过）；同时**实测复现 P2**（`DSH_HOME` 被忽略，隔离实例读到宿主机真实 `~/.dsh/web-auth.json`，需用 `DSH_WEB_AUTH_FILE` 才能真正隔离）。详见 playbook「C. 已发布 npm 产物复核」。
+- **执行 bump（2026-09-25，随 v0.1.11）**：5 个 `@deepseek-ai/dsh-*` 依赖 `^0.1.5-rc.2` → `^0.1.7-rc.1`，并**修复 P1/P2**——`isPublicRoute` 放行 `/oauth/callback`（跨站回调不再被登录墙吃掉授权码）、凭据路径改为 `DSH_WEB_AUTH_FILE` > `$DSH_HOME` > `~/.dsh`（空值视为未设置，与 harness `resolveDshHome` 一致）。baseline 文档（README 双语 / AGENTS / `auth-mechanics` / `native-auth-bridge`）同步到 0.1.7-rc.1。

@@ -4,7 +4,7 @@
 
 ## 会话认证
 
-密码用 scrypt（随机盐，64 字节）散列存 `~/.dsh/web-auth.json`（含 `username` / `passwordHash` / `secret`）；会话 cookie `dsh_sid` = `base64url(JSON{u,e}).HMAC-SHA256(secret)`，14 天有效、`HttpOnly` + `SameSite=Lax`。`secret` 随机 32 字节，`auth-reset` 时轮换。
+密码用 scrypt（随机盐，64 字节）散列存 `$DSH_HOME/web-auth.json`（默认 `~/.dsh/`，含 `username` / `passwordHash` / `secret`）；会话 cookie `dsh_sid` = `base64url(JSON{u,e}).HMAC-SHA256(secret)`，14 天有效、`HttpOnly` + `SameSite=Lax`。`secret` 随机 32 字节，`auth-reset` 时轮换。
 
 **有效期可调**：档位常量在 `src/session-limits.ts`（3/7/14/30/60/90/180 天，默认 14，无 node 依赖——client bundle 由 tsdown 内联它），持久化为 `web-auth.json` 的 `sessionMaxAgeDays` 字段（`getSessionMaxAgeDays`/`setSessionMaxAgeDays`，模仿 `requireLoopbackLogin` 的单次写模式，不轮换 secret）；`auth.ts` 的 `getSessionMaxAgeSec()` 在 `sessionCookieSet`/`buildSessionCookie` 时运行时读值，因此**调整只对新签发的会话生效**（exp 在签发时写死进 payload）。端点 `/api/auth/session-max-age`（GET/POST，模仿 `/api/auth/policy`：需认证、未注册 400、非法档位 400）。
 
@@ -53,7 +53,9 @@
 
 ## 覆盖范围（所有路由 + index fallback，含事后追溯）
 
-包装**不只限 `/api` 前缀**——所有经 `webServer.register`/`registerUpgrade` 注册的路由（含第三方插件的非 `/api` channel，如 `/dsh-automation`、技能管理器）都做「认证 + 原生 cookie 补签（0.1.2）」；只有 `/login` 与 `/api/auth/*` 保持匿名。
+包装**不只限 `/api` 前缀**——所有经 `webServer.register`/`registerUpgrade` 注册的路由（含第三方插件的非 `/api` channel，如 `/dsh-automation`、技能管理器）都做「认证 + 原生 cookie 补签（0.1.2）」；只有 `/login`、`/api/auth/*` 与 `/oauth/callback` 保持匿名。
+
+**`/oauth/callback` 的豁免（0.1.7 适配发现，P1）**：base bundle 的 `@deepseek-ai/dsh-deepseek-account-platform` 用 `ctx.effect(...)` 在**一次 DeepSeek 账号登录尝试期间**动态注册该路由（跨站顶层导航、redirect URI = `<origin>/oauth/callback`）。`dsh_sid` 是 `SameSite=Lax` 顶层 GET 会带上，但**没有会话的浏览器**（换设备点链接、清过 cookie、别的容器打开）会被 302 `/login`、授权码直接丢失；而该路由本身受单次 `state` + PKCE 校验器绑定、仅在尝试期内存在，放行不增加可达面。测试：`tests/auth.spec.ts` 的 "leaves a dynamically registered /oauth/callback anonymous"（注册后调 handler，无会话直达上游）。
 
 **0.1.2 的 index.html 走 `webServer.registerFallback`（frontend-static），不在 exact/prefix 路由表里，必须单独包装**（fallback 是 webserver 的私有单座属性 + `registerFallback` 方法，包装方式 = 事后追溯替换私有 `fallback` 字段 + 包装 `registerFallback` 方法两路都做）——漏了它，远程/回环访问 `/` 都直接撞上游 `authorizeIndex` 的 401 纯文本（实测发现）。**fallback 包装只保护 index 入口路径（`/` 与 `/index.html`）**：其余 fallback 路径都是 dist 里的公开构建产物（favicon.svg、打包 JS/CSS），未认证 GET/HEAD 直接转发（登录页引用的 `/favicon.svg` 否则会 401 破图）；解析不了的请求目标保守走完整防护。
 
@@ -65,7 +67,7 @@
 
 ## 凭据文件可覆盖
 
-`credential-store.ts` 读 `process.env.DSH_WEB_AUTH_FILE`（默认 `~/.dsh/web-auth.json`）。测试用它指向临时文件，**不碰真实凭据**。
+`credential-store.ts` 的路径优先级：`DSH_WEB_AUTH_FILE`（整个文件路径）> **`$DSH_HOME`** > `~/.dsh`（文件名 `web-auth.json`）。读 `$DSH_HOME` 与 harness 自身的 `resolveDshHome` 对齐（`packages/util/home-paths`：空/全空白视为未设置，不会把路径解析到 cwd），自定义 home 的部署因此不会和真实 `~/.dsh` **共用**凭据——0.1.7 适配时实测踩过（P2：全新 `DSH_HOME` 的隔离实例读到了宿主机的管理员账号）。测试用 `DSH_WEB_AUTH_FILE` 指向临时文件，**不碰真实凭据**。
 
 ## 登录页品牌字标
 

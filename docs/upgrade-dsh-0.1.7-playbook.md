@@ -3,12 +3,13 @@
 > 触发：把本地 harness 源码拉到最新（`~/coding/research/deepseek-harness`，原本停在 `dsh-v0.1.1-rc.2`，落后 **6511 个提交**），`git pull --ff-only` 后 HEAD = `46a7f68b09`（`git describe` = `dsh-v0.1.7-rc.1`，2026-09-23）。
 > npm dist-tags 现状：`latest` = **0.1.5-rc.3**、`next` = **0.1.7-rc.1**、`alpha` = 0.1.7-alpha.2。本插件依赖 `^0.1.5-rc.2`。
 > **与 0.1.5 那次的关键差别**：`^0.1.5-rc.2` 是 caret 范围，**稳定版一发布就会被解析进来**（prerelease 只在同 `major.minor.patch` 元组内被允许，stable 版本不受此限）。也就是说正式版落地时，`npm install` 会自动把我们拉到稳定版——**不能等到发版当天才验证**。本次因此做了「静态 diff + 构建探针 + 0.1.7-rc.1 隔离实例实机」三层验证。
+> **第二次核查（2026-09-24，见下方「C. 已发布 npm 产物复核」）**：首次核查以源码 tag 为准，第二次针对 npm 真正发布的产物复核，结论不变（插件存活、源码零改动），并**实测复现了 P2**。
 
 ## 结论速览
 
 **插件存活，源码零改动。** 在 0.1.7-rc.1 上：`typecheck` 0 错误、`vitest` 101/101、`tsdown` 构建通过；隔离实例（独立 `DSH_HOME` + 独立端口 3099）上登录墙全链路、原生 cookie 补签、boot 图 client bundle、设置面板「认证」页、LAN isLoopback 钩子、`auth-reset` 会话轮换**全部实测通过**，服务端零告警、浏览器 56 请求 0 非 2xx。
 
-需要跟进的是 **1 个新的条件性冲突**（DeepSeek 账号 OAuth 回调 `/oauth/callback` 会进我们的闸门）和 **1 个既有小瑕疵**（凭据文件不读 `$DSH_HOME`），均不阻塞升级。
+~~需要跟进的是 **1 个新的条件性冲突**（DeepSeek 账号 OAuth 回调 `/oauth/callback` 会进我们的闸门）和 **1 个既有小瑕疵**（凭据文件不读 `$DSH_HOME`），均不阻塞升级。~~ **两项已随 v0.1.11 修复（2026-09-25），5 个依赖也 bump 到 `^0.1.7-rc.1`——基线正式推进到 0.1.7-rc.1。** 详见下方「执行记录」。
 
 ## 观察哨逐项（对照 0.1.5 手册的清单）
 
@@ -131,21 +132,64 @@ web-app 本次新增 `await auditStartupEntries(connectionCtx.root, 'dsh web', �
 - 「认证」导航行图标仍是我们的盾牌 SVG；
 - 全程 **56 个请求、0 个非 2xx**；服务端日志零 error/pending/告警。
 
+### C. 已发布 npm 产物复核（2026-09-24）
+
+首次核查以 harness **源码 tag** 为准，本次针对 `npm i -g @deepseek-ai/dsh@0.1.7-rc.1` 真正落地的**已发布产物**复核，确认结论可从源码平移到产物。
+
+**时间线**：`0.1.7-rc.1` 于 npm `2026-09-23T13:44Z` 发布，首次核查在 `15:30Z`（23:30 CST）→ 首次核查针对的就是这一版；此后上游零提交（`origin/master` 仍 = `46a7f68b09` = tag `dsh-v0.1.7-rc.1`），无 rc.2 / 无新分支。
+
+**产物解包逐点核对**（`npm pack` 四个包，与源码结论逐字一致）：
+
+| 耦合点 | 已发布产物实测 |
+|---|---|
+| 原生 cookie | `lib/index.js`：`COOKIE_PREFIX = "dsh-auth-"`、`AUTH_RECORD_KEY = credentialKey("client-connection","browser-session")`、名字 = prefix + base64url(sha256(authority))、值 `v1.<body>.<sig>`（HMAC-SHA256 over body）、`SameSite=Strict; HttpOnly; Path=/` |
+| `/api` 闸门 | `requestRejection`（403 信任围栏 → 401 原生 cookie）、`admit()`、prefix 路由经 `webCtx.webServer.register(route)` + `waterfall("connection/request", …)` |
+| webserver 注册口 | `register` / `registerUpgrade` / `registerFallback` 三口健在（`lib/index.js:177/191/206`） |
+| 客户端信任钩子 | `__DSH_TRANSPORT__` 仍被读、`isLoopback: transport?.ownsHost === true \|\| pageLocation === undefined \|\| isLoopbackHostname(...)` 逐字未变 |
+| `0.0.0.0` 拒绝 | `web-app/lib/startup.js:40` 仍在 → `remote-web-startup` 替换仍是刚需 |
+| patch 目标 | 产物内 `cordis.patch.yml` 仍有 `id: web-startup`(142) 与 `id: connection`(197) |
+
+本插件镜像常量与产物逐条相同（`src/auth.ts` 的 371 / 376 / 406 / 465 / 471 行）。
+
+**实机复核**（`/tmp/dsh017` 装的 0.1.7-rc.1 CLI + 全新 `DSH_HOME=/tmp/dsh017-verify` + 端口 3099 + `--host 0.0.0.0`）：
+
+- `typecheck` 0 错误、`vitest` **101/101**、`tsdown` `lib/client.js` **42.57 kB**（与首次核查完全一致）；
+- `--dump-config`：`web-startup` disabled、`connection` inject `[webServer, webRuntime, webAuth]`、本插件三行齐全；
+- curl：匿名 `/`（html 导航）→ **302 `/login`**、`/login` 与 `/api/auth/status` 200、匿名受保护 `/api/*` → **401**、注册 200（**2 个 Set-Cookie**）；
+- **补签三段对照（关键证据）**：匿名 `/api/rpc` → `{"error":"unauthorized"}`（**本插件**闸门）；仅 `dsh_sid` 无原生 cookie → 纯文本 `unauthorized`（**上游** `requestRejection` 的 401）；双 cookie → 404（已穿过上游闸门）→ **证明补签出的原生 cookie 被上游自己的校验器接受**；
+- 仅 `dsh_sid` 的导航 → **200 bounce + `Set-Cookie dsh-auth-<sha256(authority)>`**（authority = `192.168.5.216:3099`）；登出双 cookie `Max-Age=0`；`auth-reset` 后旧会话 **302**、旧密码 **401**、新密码 **200**；
+- boot 图 `plugins/??dsh-web-startup-auth/client.js&rev=<rev>`（相对路径；**`&rev=` 不可省——省掉直接 404**），匿名 401 / 已认证 200（42,614 B）；
+- 真实浏览器（chromium，LAN 地址）：登录表单 → 主界面；`__DSH_TRANSPORT__ === {"ownsHost":true}`；设置面板导航含「通用设置/模型/内置插件/Agent 预设/**认证**」，「认证」页四块内容齐全；「认证」行图标仍是我们的盾牌 SVG（`class="…navIcon"`）；「模型」页正常、**无 `settings are unavailable`**；全程 **50 请求 0 非 2xx**，服务端零告警。
+
 ## 待跟进清单（不阻塞升级，但正式版前应处理）
 
-1. **P1｜`/oauth/callback` 会被登录墙拦住（新的条件性冲突）**
+1. ✅ **P1｜`/oauth/callback` 会被登录墙拦住（新的条件性冲突）——已修复（v0.1.11，2026-09-25）**
    上游账号登录把回调注册在**同一个 webserver** 上（`webServer.register({ kind: 'exact', path: '/oauth/callback' })`，redirect URI = `window.location.origin + /oauth/callback`）。我们的 `isPublicRoute` 只豁免 `/login` 与 `/api/auth/*`，所以**当一次登录尝试正在进行时**，该回调会被包装器接管：
    - 同浏览器已登录（有 `dsh_sid`，`SameSite=Lax` 在顶层 GET 导航会带上）→ 放行，正常；
    - 浏览器没有 `dsh_sid`（换浏览器打开登录链接、清过 cookie、或平台侧在别的容器里打开）→ **302 `/login`，OAuth 回调丢失**。
    建议：把 `/oauth/callback` 加入 `isPublicRoute`（它本身由 `state` + PKCE 保护，且只在一段登录尝试期间存在，暴露面极小），并在 `docs/agent/auth-mechanics.md` 记一条。
-2. **P2｜凭据文件硬编码 `~/.dsh`，不读 `$DSH_HOME`**
-   `src/credential-store.ts` 用 `join(homedir(), '.dsh')`（仅测试用 `DSH_WEB_AUTH_FILE` 覆盖）。默认部署下与 dsh 的 home 一致，所以不是 bug；但自定义 `DSH_HOME` / 多 profile 的用户会把凭据写到别处。建议改为优先读 `$DSH_HOME`。
+   *第二次核查补充（2026-09-24）*：路径确认来自 `packages/credentials/deepseek-account-platform/src/index.ts:377`，**该包属于 base bundle 默认安装**（`bundle/base/package.json:125` + `cordis.patch.yml:113`，已发布产物里存在）；路由由 `ctx.effect(...)` 在**一次登录尝试期间**动态注册、尝试结束即 dispose → 与上述「条件性」判断一致。另确认 bounce 分支保留完整 request target（`src/auth.ts:1105` 用 `req.url`），所以**已登录用户的回调不会被 bounce 丢掉**（meta refresh 回带 `code`/`state`），丢失面仅限「无 `dsh_sid`」那一种。
+2. ✅ **P2｜凭据文件硬编码 `~/.dsh`，不读 `$DSH_HOME`** —— **2026-09-24 实测复现，已修复（v0.1.11，2026-09-25）**
+   `src/credential-store.ts` 用 `join(homedir(), '.dsh')`（仅 `DSH_WEB_AUTH_FILE` 覆盖）。第二次核查用全新 `DSH_HOME=/tmp/dsh017-verify` 起服务，`/api/auth/status` 直接返回 `{"registered":true}`、注册被拒「管理员账号已设置」——**它读的是宿主机真实的 `~/.dsh/web-auth.json`**（mtime 未变，未被写坏；改设 `DSH_WEB_AUTH_FILE` 后隔离才成立）。
+   影响：`DSH_HOME` 自定义 / 多 profile / 多实例部署会**共用同一份凭据**（既可能串号，也可能让「隔离实例」意外拿到生产管理员账号）。建议改为优先读 `$DSH_HOME`。
 3. **P3｜文档与验收命令的 URL 形状**
    boot 图引用已从 `/plugins/??…` 变为相对 `plugins/??…`；`docs/agent/*` 与验收清单里相关表述要更新。
 4. **P4｜可选优化：改用官方 `connection/request` waterfall**
    比 monkey-patch `webServer.register` 更稳（上游显式开放的扩展点）。非必需，可作为独立重构。
 5. **P5｜第三方 bundle 实测**
    dshmarket / dsh-better-sidebar / dsh-ntr 等随 `next` 浮动，正式版迁移时逐个升 + 重启验证（沿用 0.1.2 的教训）。
+
+## 执行记录（2026-09-25，随 v0.1.11 落地）
+
+清单 1–4 已全部执行，本节是执行留痕：
+
+1. ✅ **依赖 bump**：5 个 `@deepseek-ai/dsh-*` `^0.1.5-rc.2` → `^0.1.7-rc.1`（`dsh-credentials` / `dsh-cmdline` / `dsh-host-webserver` / `dsh-client-ui-settings` / `dsh-client-ui-slots`），`npm install` 重生成锁文件（顺带把 `schemastery` 解析到 3.18.4，即 PR #32 想要的版本，该 PR 可关）。
+2. ✅ **全链路**：`typecheck` 0 错误、`vitest` **180/180**（含滑块拼图新测试）、`build` 通过（新 build 脚本先清空 `lib/`，构建后 `git status` 对 `lib/` 零差异 = 产物可复现）。
+3. ✅ **P1**：`src/auth.ts` 的 `isPublicRoute` 增加 `path === '/oauth/callback'`（注册后动态路由路径逐字匹配）；测试 `tests/auth.spec.ts` "leaves a dynamically registered /oauth/callback anonymous"（无会话的远程请求直达上游 handler）；机制记入 `docs/agent/auth-mechanics.md`「覆盖范围」。
+4. ✅ **P2**：`src/credential-store.ts` 改为 `DSH_WEB_AUTH_FILE` > **`$DSH_HOME`** > `~/.dsh`（空/全空白视为未设置，与 harness `packages/util/home-paths` 的 `resolveDshHome` 同语义），`ensureDir` 与文件路径共用同一目录函数；测试两例（自建 home 写入生效 + 空值回落默认）。
+5. ⬜ `--dump-config` + 实机验收：**rc.1 隔离实例与作者真实实例（0.1.7-rc.1 + 本插件 link）均已实测通过**（见「A. 构建探针」「B. 隔离实例」「C. 已发布 npm 产物复核」），本版相对 0.1.7-rc.1 仅增加上述两处小修，未改动补签/闸门/patch 逻辑。
+6. ⬜ 真实 DeepSeek 账号 OAuth 回调端到端（隔离实例无 DeepSeek 凭据，仍无法实测——P1 修复的回归测试覆盖的是「不被登录墙吃掉」这一段）。
+7. ✅ **文档**：README 双语 / AGENTS / `auth-mechanics` / `native-auth-bridge` 的基线与凭据路径表述同步到 0.1.7-rc.1。
 
 ## 正式版发布时的迁移动作（执行清单）
 
