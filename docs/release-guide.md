@@ -15,8 +15,10 @@
 
 ```sh
 git status                 # 工作区必须干净；有未提交改动先提交
-git log origin/main..HEAD  # 列出待推送提交，这就是 release notes 的素材
+git log v<上一版本>..HEAD   # release notes 的素材 = 自上个 tag 以来的全部提交
 ```
+
+⚠️ **素材区间是「上个 tag」而不是 `origin/main..HEAD`**：后者只列本次未推送的提交，会漏掉「早已合进 main、但没随上一版发布」的提交（v0.1.12 就这么漏了 IPv6 #35，发布后补修 notes）。用 `git log v<x.y.z-1>..HEAD --oneline` 逐条过，每条用户可见的改动都要在 notes 里有对应行；纯 devDeps/内部重构/文档可不写。
 
 ### 2. 全链路验证
 
