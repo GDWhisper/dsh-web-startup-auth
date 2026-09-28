@@ -2,7 +2,7 @@
 
 > 对应 0.1.7 手册（`docs/upgrade-dsh-0.1.7-playbook.md`）的三层验证方法论：**静态 diff + 构建探针 + 隔离实例实机**。审查日期 2026-09-28，harness 源码拉至 `dsh-v0.2.0-rc.1`（`origin/master` = `4878cdabd8` = 该 tag），npm dist-tags：`next` = `0.2.0-rc.1`、`latest` = `0.1.7-rc.2`。
 >
-> 本次是**审查**：结论是「插件存活、源码零改动」；依赖 bump（`^0.1.7-rc.1` → `^0.2.0-rc.1`）是发版动作，未在本次执行（见「迁移动作」）。
+> 本次是**审查**：结论是「插件存活、源码零改动」；依赖 bump（`^0.1.7-rc.1` → `^0.2.0-rc.1`）是发版动作，已于同日随 v0.1.12 执行完毕（见「迁移动作」末尾的执行记录）。
 
 ## 结论速览
 
@@ -96,6 +96,8 @@
 3. `--dump-config` + 登录墙冒烟（本手册 A 表可直接复用，探针目录 `/tmp/dsh-auth-probe-020` 是同一套）；
 4. baseline 文档四处同步（README 双语 / AGENTS / `native-auth-bridge`）；
 5. 发版走 `docs/release-guide.md`。
+
+**已执行（2026-09-28，随 v0.1.12）**：五步全部完成——5 依赖 bump 到 `^0.2.0-rc.1`（npm 解析到 0.2.0-rc.1，lock 根条目顺带同步 peer 声明）、全链路 213/213、隔离实例冒烟（dump-config 三行、登录墙 302、登录双 cookie、仅 `dsh_sid` 纯文本 401、仅原生 cookie JSON 401、双 cookie 过闸门到 bridge 404、补签 200 跳板）全绿、baseline 文档同步、发版走 release-guide。同批合并 Renovate #33（vitest 5.0.2）/#34（@types/node 24.19.0，均逐分支 `npm ci` + 全链路验证后 merge）。
 
 **未决项（继承自 0.1.7 手册，不阻塞）**：真实 DeepSeek 账号 OAuth 回调端到端仍未实测（隔离实例无 DeepSeek 凭据）；0.2.0 上 `/oauth/callback` 路由仍由 P1 修复（v0.1.11）放行，回归测试覆盖「不被登录墙吃掉」一段。
 

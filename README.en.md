@@ -4,7 +4,7 @@
 
 A [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness) plugin that enables **remote web startup with username/password authentication**.
 
-> **⚠️ Version tracking notice**: This project only tracks the official `next` dist-tag (the pre-stable release channel) and does not follow the `alpha` preview channel (current baseline: dsh 0.1.7-rc.1; dsh 0.2.0-rc.1 adaptation verified with zero source changes — the dependency bump ships with the next release, see `docs/upgrade-dsh-0.2.0-playbook.md`).
+> **⚠️ Version tracking notice**: This project only tracks the official `next` dist-tag (the pre-stable release channel) and does not follow the `alpha` preview channel (current baseline: dsh 0.2.0-rc.1, with all five `@deepseek-ai/dsh-*` dependencies bumped to `^0.2.0-rc.1`; see `docs/upgrade-dsh-0.2.0-playbook.md` for the adaptation review and sentinels).
 
 ![Login page](docs/login-page.png)
 
@@ -23,7 +23,7 @@ The stock `@deepseek-ai/dsh-web-app/startup` **hard-rejects `--host 0.0.0.0`** f
 - **"Auth" tab in the settings panel**: Injects an "Auth" page into the DSH settings panel with **Sign out**, **Change username**, **Change password**, and a **session-lifetime** selector. The tab shows a **shield-with-check** glyph in the nav (upstream lets no registrant pick an icon, so the plugin swaps the default gear client-side).
 - **Remote-scenario fixes** (LAN/HTTP pitfalls):
   - `crypto.randomUUID` polyfill — the API is missing in non-secure contexts; without it every RPC fails.
-  - Native browser-auth bridge — since dsh 0.1.2 (current baseline 0.1.7) upstream ships its own browser authentication (signed `dsh-auth-*` cookies) and requires the cookie on `/api` and on `index.html` with **no loopback exemption** (even the local browser must first swap a launch-token URL). This plugin mints that cookie for callers that already passed ITS authentication — a valid `dsh_sid` session, or a genuine loopback request (loopback TCP peer *and* loopback `Host`): page navigations pick it up through a single 200 bounce document (a 3xx mint gets replayed on every hop until `ERR_TOO_MANY_REDIRECTS`, since a cookie set by a redirect response is not sent to that redirect's target) and the login responses hand it out directly, so the printed token URL is never needed. Username/password plus revocable sessions stay the only auth entry point; the upstream cookie merely lets requests through upstream's own gate.
+  - Native browser-auth bridge — since dsh 0.1.2 (current baseline 0.2.0-rc.1) upstream ships its own browser authentication (signed `dsh-auth-*` cookies) and requires the cookie on `/api` and on `index.html` with **no loopback exemption** (even the local browser must first swap a launch-token URL). This plugin mints that cookie for callers that already passed ITS authentication — a valid `dsh_sid` session, or a genuine loopback request (loopback TCP peer *and* loopback `Host`): page navigations pick it up through a single 200 bounce document (a 3xx mint gets replayed on every hop until `ERR_TOO_MANY_REDIRECTS`, since a cookie set by a redirect response is not sent to that redirect's target) and the login responses hand it out directly, so the printed token URL is never needed. Username/password plus revocable sessions stay the only auth entry point; the upstream cookie merely lets requests through upstream's own gate.
 
 ## Install
 
