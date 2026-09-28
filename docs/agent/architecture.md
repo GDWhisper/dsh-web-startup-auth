@@ -2,7 +2,7 @@
 
 ## 仓库文件布局
 
-`src/*.ts`、`src/slider/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，不入库但发布时由 `files` 字段带上）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见 `renovate.md`）、`README.md`（用户文档）、`AGENTS.md`（本索引）+ `docs/agent/`（本目录，按任务展开的细节）。
+`src/*.ts`、`src/slider/*.ts` 与 `src/client/*.tsx`（源码，唯一修改入口）、`lib/`（构建产物，**入库**——`npm run build` 后随改动一并提交；发布时由 `files` 字段带上；删源码必须清理旧产物，否则死产物会跟着发布）、`tsdown.config.ts`（前端 bundle 打包）、`cordis.patch.yml`（bundle patch）、`tests/*.spec.ts`（vitest）、`renovate.json`（依赖更新机器人配置，见 `renovate.md`）、`README.md`（用户文档）、`AGENTS.md`（本索引）+ `docs/agent/`（本目录，按任务展开的细节）。
 
 ## 它做了什么（与原版的差异）
 

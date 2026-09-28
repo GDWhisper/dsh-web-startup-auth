@@ -11,7 +11,7 @@ dsh 插件 `dsh-web-startup-auth` 的入场指南。
 - 这是一个 **dsh 插件包（bundle）**：**替换** dsh 原生的 Web 启动器 + 加一层登录认证，让 `dsh web --host 0.0.0.0` 可以安全地暴露到局域网/非回环接口。
 - 三个插件入口（`package.json` 的 `exports` 子路径分别暴露）：
   - `dsh-web-startup-auth/startup` → 插件 id `remote-web-startup`（`src/startup.ts`）：与原版 `@deepseek-ai/dsh-web-app/startup` 的区别是**不拒绝 `--host 0.0.0.0`**、并支持 `--host ::` 等 IPv6 地址（#35：原地拓宽上游 webserver 的 host schema，见 `docs/agent/ipv6-bind.md`），提供同名 `webStartup` 服务。
-  - `dsh-web-startup-auth/auth` → 插件 id `web-auth`（`src/auth.ts`）：登录/注册页、会话 cookie、`/api` 路由保护、原生浏览器认证 cookie 补签（0.1.2 上游的 `dsh-auth-*` 签名 cookie）、**可选滑块拼图验证**（`src/slider/`，默认关闭，装饰性——见 `docs/agent/human-verification.md`）、`webAuth` 服务。
+  - `dsh-web-startup-auth/auth` → 插件 id `web-auth`（`src/auth.ts`）：登录/注册页、会话 cookie、`/api` 路由保护（双层：注册包装默认拒绝 + 上游官方 `connection/request` waterfall 权威闸门，`docs/agent/auth-mechanics.md`「路由保护顺序」）、原生浏览器认证 cookie 补签（0.1.2 上游的 `dsh-auth-*` 签名 cookie）、**可选滑块拼图验证**（`src/slider/`，默认关闭，装饰性——见 `docs/agent/human-verification.md`）、`webAuth` 服务。
   - `dsh-web-startup-auth/client` → 前端插件（`src/client/index.tsx`，产物 `lib/client.js`）：向 DSH 设置面板 `settings.section` slot 注册「认证」标签页（退出登录 + 修改用户名 + 修改密码 + 会话有效期 + 拼图验证开关）。
 - 构建流水线：`src/*.ts` → `tsc` → `lib/*.js`，前端插件额外 `tsdown` → `lib/client.js`（**必须 `npm run build` 后插件才能加载**，`exports` 指向 `lib/`）。`build` 会先清空 `lib/`——它**是入库的**，`tsc` 不会删除孤儿产物，不清理的话删掉一个源文件后旧产物仍会随 `npm pack` 发布。
 - 母体（原版 web-app bundle）在 `~/coding/research/deepseek-harness/packages/bundle/web-app/`（作者本机路径，见上方「路径约定」），涉及对比/移植时先对照它。
@@ -58,8 +58,8 @@ dsh --profile web auth-reset [--password <pwd>] [--username <name>]   # 重设�
 | 改登录/会话/凭据/信任判定/路由保护/auth-reset/登录页 | `docs/agent/auth-mechanics.md` |
 | 改滑块拼图验证、登录限流（每 IP + 全局退避） | `docs/agent/human-verification.md` |
 | 改 `--host` IPv6 绑定、webserver host schema 拓宽、`connection` 的 IPv6 trustedHosts | `docs/agent/ipv6-bind.md`（含升级观察哨；上游放开 schema 后的清理清单） |
-| 改原生 cookie 补签、`__DSH_TRANSPORT__` hook、升级 dsh 后的适配 | `docs/agent/native-auth-bridge.md`（升级先看 `docs/upgrade-dsh-0.1.2-playbook.md` / `docs/upgrade-dsh-0.1.5-playbook.md` / `docs/upgrade-dsh-0.1.7-playbook.md` 的观察哨，第一步 diff `browser-auth.ts`） |
-| 正式版发布前确认插件是否还活着 | `docs/upgrade-dsh-0.1.7-playbook.md`（0.1.7-rc.1 三层验证：静态 diff + 构建探针 + 隔离实例实机 + 已发布产物复核；P1 `/oauth/callback`、P2 `$DSH_HOME` **已随 v0.1.11 修复**） |
+| 改原生 cookie 补签、`__DSH_TRANSPORT__` hook、升级 dsh 后的适配 | `docs/agent/native-auth-bridge.md`（升级先看 `docs/upgrade-dsh-0.2.0-playbook.md` / `docs/upgrade-dsh-0.1.7-playbook.md` / `docs/upgrade-dsh-0.1.5-playbook.md` / `docs/upgrade-dsh-0.1.2-playbook.md` 的观察哨，第一步 diff `browser-auth.ts` 与 `connection/src/index.ts` 的 `connection/request`——waterfall 闸门耦合点） |
+| 正式版发布前确认插件是否还活着 | `docs/upgrade-dsh-0.1.7-playbook.md`（0.1.7-rc.1 三层验证：静态 diff + 构建探针 + 隔离实例实机 + 已发布产物复核；P1 `/oauth/callback`、P2 `$DSH_HOME` **已随 v0.1.11 修复**）；0.2.0-rc.1 复审沿用同一方法论，见 `docs/upgrade-dsh-0.2.0-playbook.md` |
 | 改设置面板「认证」标签页、slot 注册、导航图标、暗黑模式、预取与状态未知态 | `docs/agent/settings-section.md` |
 | 处理 Renovate 依赖更新 PR | `docs/agent/renovate.md` |
 | 发版 | `docs/release-guide.md` |
@@ -88,3 +88,4 @@ dsh --profile web auth-reset [--password <pwd>] [--username <name>]   # 重设�
 - **正式版前置核查（2026-09-23）**：harness 源码已拉到 `dsh-v0.1.7-rc.1`（`next` 指向它，`latest` = 0.1.5-rc.3）。核查结论 = **插件存活、源码零改动**，且依赖是 caret 范围（稳定版一发布就会被 `npm install` 解析进来），故已在 0.1.7-rc.1 上完成构建探针 + 隔离实例实机验证。完整证据、待跟进项与迁移清单见 `docs/upgrade-dsh-0.1.7-playbook.md`。
 - **第二次核查（2026-09-24）**：针对 npm 已发布产物（而非仅源码 tag）复核，结论不变（101/101、dump-config、登录墙/补签/登出/`auth-reset`/设置面板「认证」页全部实测通过）；同时**实测复现 P2**（`DSH_HOME` 被忽略，隔离实例读到宿主机真实 `~/.dsh/web-auth.json`，需用 `DSH_WEB_AUTH_FILE` 才能真正隔离）。详见 playbook「C. 已发布 npm 产物复核」。
 - **执行 bump（2026-09-25，随 v0.1.11）**：5 个 `@deepseek-ai/dsh-*` 依赖 `^0.1.5-rc.2` → `^0.1.7-rc.1`，并**修复 P1/P2**——`isPublicRoute` 放行 `/oauth/callback`（跨站回调不再被登录墙吃掉授权码）、凭据路径改为 `DSH_WEB_AUTH_FILE` > `$DSH_HOME` > `~/.dsh`（空值视为未设置，与 harness `resolveDshHome` 一致）。baseline 文档（README 双语 / AGENTS / `auth-mechanics` / `native-auth-bridge`）同步到 0.1.7-rc.1。
+- **0.2.0 审查（2026-09-28）**：harness 源码已拉到 `dsh-v0.2.0-rc.1`（`next` 指向它，`latest` = 0.1.7-rc.2）。审查结论 = **插件存活、源码零改动**（15 项观察哨 + 插件安装面全绿；构建探针 201/201，隔离实例登录墙/补签/`auth-reset`/client bundle/`--host ::` 双栈围栏/设置面板「认证」页实测通过）。**caret+prerelease 语义反转**：`^0.1.7-rc.1` 不会自动解析进 0.2.x，bump 必须手动（不 bump 会停在 0.1.7-rc.2；rc.1→rc.2→0.2.0-rc.1 是同一 master 线，镜像文件全程零 diff）。完整证据与迁移清单见 `docs/upgrade-dsh-0.2.0-playbook.md`。同日落地两项可选改进（详见该 playbook「可选改进落地」）：**`@deepseek-ai/dsh` peer 版本门槛**（`>=0.1.7-rc.1 <0.3.0-0`，超出范围 dsh 整包跳过本 bundle 并打印原因；`-0` 后缀不可「简化」成 `<0.3.0`，`tests/package-manifest.spec.ts` 钉死）与**共享 API 的 `connection/request` waterfall 会话闸门**（注册包装 + waterfall 双层互备，见 `docs/agent/auth-mechanics.md`「路由保护顺序」）。

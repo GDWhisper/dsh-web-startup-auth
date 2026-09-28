@@ -49,7 +49,14 @@
 
 ## 路由保护顺序（重要）
 
-`web-auth` 在 `apply` 里同步包装 `webServer.register` 与 `webServer.registerUpgrade`，所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活。改动 patch 时保持这个注入，否则 API 不设防。
+会话边界在**两层**，刻意重复、互为保险（2026-09-28 起，可选改进 P4）：
+
+1. **注册包装层（默认拒绝 + mint）**：`web-auth` 在 `apply` 里同步包装 `webServer.register`/`registerUpgrade`/`registerFallback`，每个受保护请求先过 `isAuthorized`（未认证：页面导航 302 `/login`、其余 JSON 401），通过者缺原生 cookie 时先补签（见 `native-auth-bridge.md`）。所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活——否则包装覆盖不到 `/api`。改动 patch 时保持这个注入，否则 API 不设防。
+2. **共享 API 权威闸门（上游官方扩展点）**：`connection/request` waterfall（上游 0.1.6-alpha.2 引入、本插件跟踪的各版本线均有；connection 的 `/api` 路由在 `admit`＝信任围栏 403 + 原生 cookie 401 **之后**、bridge 之前派发）挂着第二个 `isAuthorized` 闸门：只带原生 cookie（30 天、无账号、不可撤销）而无 `dsh_sid` 的请求在此被拒（JSON 401），`next()` 不被调用，到不了 bridge。
+
+**为什么两层都要**：上游若改路由注册形态导致包装静默失效，**共享 API** 仍有 waterfall 闸门兜住（可撤销性不失守）；waterfall 事件若被上游改名/删除，包装层仍然守全量路由。但互备范围仅限共享 API：waterfall 看不见的面（index fallback、upgrade、第三方 channel）只有包装层在守，包装层若单独锈蚀，这些面退回到上游原生 cookie 闸门——按本插件威胁模型**可撤销性失守**（正是原生 cookie 不可单独当凭据的原因），另可能损失补签/302 等 UX。**mint 不能迁到 waterfall**：监听器运行时 `admit` 已经索取过原生 cookie（补签正是为它服务），而且非共享 API 的路由 waterfall 根本看不见。两层共享同一 `isAuthorized` 判定（单一事实源，不存在两套「什么算会话」的定义）。测试：`tests/auth.spec.ts` "connection/request waterfall gate"（含「仅原生 cookie 必须死在闸门」用例）与 `tests/waterfall-integration.spec.ts`（真实 cordis 事件总线派发）。
+
+**升级 dsh 时**：diff `packages/client/connection/src/index.ts` 的 `connection/request` **声明与派发位置**（`admit` 之后、bridge 之前）——事件改名/移位会让内层闸门静默失效（外层包装挡着未授权请求，冒烟电池看不出差别），观察哨清单见 `docs/upgrade-dsh-0.2.0-playbook.md`。
 
 ## 覆盖范围（所有路由 + index fallback，含事后追溯）
 

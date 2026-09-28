@@ -4,7 +4,7 @@
 
 A [DSH (DeepSeek Harness)](https://github.com/deepseek-ai/deepseek-harness) plugin that enables **remote web startup with username/password authentication**.
 
-> **⚠️ Version tracking notice**: This project only tracks the official `next` dist-tag (the pre-stable release channel) and does not follow the `alpha` preview channel (current baseline: dsh 0.1.7-rc.1).
+> **⚠️ Version tracking notice**: This project only tracks the official `next` dist-tag (the pre-stable release channel) and does not follow the `alpha` preview channel (current baseline: dsh 0.1.7-rc.1; dsh 0.2.0-rc.1 adaptation verified with zero source changes — the dependency bump ships with the next release, see `docs/upgrade-dsh-0.2.0-playbook.md`).
 
 ![Login page](docs/login-page.png)
 
@@ -42,6 +42,8 @@ dsh plugin --profile web add dsh-web-startup-auth@latest
 ```
 
 > `dsh plugin` forwards to pnpm and requires `--profile <name>`; `add .` installs the current directory as a `link:` dependency.
+
+> **Version range**: this plugin declares support for dsh `>=0.1.7-rc.1` and refuses the `0.3.0` line (including its pre-releases). When the running dsh falls outside the range, dsh **skips this bundle and prints why** — deliberately fail-loud: better not to load at all than to run silently on an unverified dsh *minor line*. The granularity is the minor line: later versions on the same line (including rc pre-releases) load normally; every new minor line needs adaptation before the range is widened. A profile version exemption can force it on if you insist.
 
 Start:
 
@@ -81,6 +83,7 @@ If you are looking for an out-of-the-box IDE built for the Agent era, check out 
 - **Sessions cannot be revoked server-side**: `dsh_sid` is a self-contained signed cookie; `/api/auth/logout` only clears it on the browser side. A leaked cookie (e.g. sniffed over plaintext HTTP) cannot be individually revoked within its lifetime (bounded by the session-lifetime choice made in the settings panel). **Exceptions**: `dsh --profile web auth-reset`, the "Change password" and "Change username" actions in the settings panel all **rotate the session secret**, invalidating all sessions at once (after the change the current session is re-issued, so you stay signed in).
 - **First-registration window**: while no credentials are set, any visitor can register as admin. **Complete the first registration before exposing the service to an untrusted network.**
 - **Login throttling**: login failures are rate-limited per client IP — 5 consecutive failures lock the client out for 30 seconds (in-memory only, not persisted); registration requires a password of at least 8 characters. Throttling covers `/api/auth/login`, `/api/auth/change-password`, and `/api/auth/change-username` (a wrong old/current password also counts). For stricter protection, add general rate limiting at your reverse proxy.
+- **Two-layer API session gate**: every protected route is denied by default at the registration layer (unauthenticated navigations get a 302 to the login page, everything else 401); the shared API additionally carries a session gate mounted on upstream's official `connection/request` extension point. The two layers insure each other: if an upstream interface change disables one, the other still guarantees that **only a revocable session (or a genuine loopback caller) can reach the API** — the upstream native cookie, which cannot be revoked on its own for 30 days, never works as an API credential by itself.
 - **Credential file permissions**: `$DSH_HOME/web-auth.json` (default `~/.dsh/web-auth.json`; password hash + session signing key) is saved with `0600`, its directory with `0700`; the plugin repairs overly-broad permissions left by older versions at startup.
 - **`--trusted-host`**: kept only for CLI compatibility with the stock launcher; it **plays no part in this plugin's auth decisions** — remote clients always need a valid session; there is no "trusted host skips login".
 - **Reverse-proxy deployments (nginx, …)**: binding dsh to `127.0.0.1` and letting the proxy terminate TLS and forward is supported. The proxy **must forward the real `Host`** (nginx does by default via `proxy_set_header Host $host;`; pass `--trusted-host <domain>` so DSH's own Host fence accepts it); once authenticated, the plugin mints the upstream native browser cookie under the request's **real `Host`** (the public domain), so upstream's gate accepts the request. If the proxy instead hard-codes `Host: 127.0.0.1`, the plugin reads the request as local and **lets all traffic through unauthenticated** — do not configure it that way. `X-Forwarded-For` is never consulted (a client can forge it); trust is decided solely by the TCP peer address and `Host`.

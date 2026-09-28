@@ -4,7 +4,7 @@
 
 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness)远程 Web 启动 + 用户名/密码认证插件。
 
-> **⚠️ 版本跟进声明**：本项目只跟进官方 dsh 的正式发布通道（`next` dist-tag），不跟进 `alpha` 预览通道（当前基线：dsh 0.1.7-rc.1）。
+> **⚠️ 版本跟进声明**：本项目只跟进官方 dsh 的正式发布通道（`next` dist-tag），不跟进 `alpha` 预览通道（当前基线：dsh 0.1.7-rc.1；dsh 0.2.0-rc.1 适配已审查通过、源码零改动，依赖 bump 随下一次发版执行，见 `docs/upgrade-dsh-0.2.0-playbook.md`）。
 
 ![登录页](docs/login-page.png)
 
@@ -43,6 +43,8 @@ dsh plugin --profile web add dsh-web-startup-auth@latest
 ```
 
 > `dsh plugin` 是 pnpm 转发器，`--profile <name>` 必填；`add .` 会把当前目录以 `link:` 方式装进 profile。
+
+> **版本范围**：本插件声明支持 dsh `>=0.1.7-rc.1`、不支持 `0.3.0` 起的版本线（含其预发布版）。运行中的 dsh 超出范围时，dsh 会**跳过本 bundle 并打印原因**——这是刻意的 fail-loud：宁可不加载，也不在未适配验证过的 dsh **minor 版本线**上静默运行。注意粒度是 minor 线：同一条线内的后续版本（含 rc 等预发布）会照常加载，每出一条新 minor 线要先完成适配再考虑放宽范围。确需强行启用可走 profile 的 version exemption（插件管理器文档）。
 
 启动：
 
@@ -89,6 +91,7 @@ dsh web --host :: --port 8080
 - **会话不可服务端撤销**：`dsh_sid` 是自包含签名 cookie，`/api/auth/logout` 只清除浏览器一侧的 cookie。cookie 一旦泄露（如明文 HTTP 下被嗅探），在有效期内无法单独吊销（上限即设置面板所选的会话有效期档位）。**例外**：`dsh --profile web auth-reset`、设置面板的「修改密码」与「修改用户名」都会**轮换会话密钥**，一次性让所有已登录的浏览器重新登录（操作者自己的当前会话由服务端重新签发，保持登录）。
 - **首次注册窗口**：凭据未设置时任何访问者都可注册为管理员。**在把服务暴露到不可信网络之前**请先完成首次注册。
 - **登录防护**：登录失败按客户端 IP 限速——连续 5 次失败锁定 30 秒（纯内存、无持久化）；注册要求密码至少 8 个字符。限速覆盖 `/api/auth/login`、`/api/auth/change-password` 与 `/api/auth/change-username`（旧密码/当前密码错误同样计次）。如需更严格防护请在反向代理层增加通用限速。
+- **API 会话闸门双层防护**：所有受保护路由在注册层默认拒绝（未认证导航 302 登录页、其余 401）；共享 API 另有一道挂在上游官方 `connection/request` 扩展点上的会话闸门。两层互为保险：上游接口变化导致其中一层失效时，另一层仍保证**只有可撤销的会话（或真本机回环）能访问 API**——30 天不可单独吊销的上游原生 cookie 永远不能单独作为 API 凭据。
 - **凭据文件权限**：`$DSH_HOME/web-auth.json`（默认 `~/.dsh/web-auth.json`；含密码哈希与会话签名密钥）以 `0600` 保存，目录以 `0700` 创建；插件启动时会自动修复旧版本遗留的过宽权限。
 - **`--trusted-host`**：该参数仅为与原版 CLI 兼容而保留透传，**不参与本插件认证判断**——远程客户端一律需要有效会话，不存在"受信主机免登录"。
 - **反向代理（nginx 等）部署**：可以放心的做法是 dsh 只监听 `127.0.0.1`，由代理做 SSL 卸载并转发。此时**代理必须转发真实 `Host`**（nginx 默认即为 `proxy_set_header Host $host;`，配上 `--trusted-host <域名>` 让 DSH 自身的 Host 围栏放行）；认证通过后插件按**请求的真实 `Host`（公网域名）**补发上游原生浏览器 cookie，上游闸门据此放行。反之，若代理把 `Host` 写死成 `127.0.0.1`，插件会认为请求来自本机从而**放行全部流量、不做认证**——不要这样配置。`X-Forwarded-For` 不被采信（客户端可伪造），信任判定只看 TCP 对端地址与 `Host`。

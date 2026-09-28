@@ -1,6 +1,6 @@
 # 原生浏览器认证桥接与 isLoopback 覆盖
 
-> 两个针对 dsh 0.1.2+ 上游机制的前端/补签适配。升级 dsh 后必须先 diff `packages/client/connection/src/browser-auth.ts`（本文件是对它的精确镜像）。
+> 两个针对 dsh 0.1.2+ 上游机制的前端/补签适配。升级 dsh 后必须先 diff `packages/client/connection/src/browser-auth.ts`（本文件是对它的精确镜像），以及 `connection/src/index.ts` 的 `connection/request` 声明与派发位置（`auth-mechanics.md`「路由保护顺序」的 waterfall 闸门耦合点）。
 
 ## 原生浏览器认证桥接（dsh 0.1.2 起，当前基线 0.1.7-rc.1，替代旧「特权 API 回环放行」）
 
@@ -11,8 +11,8 @@
 - **页面导航（GET/HEAD）**缺原生 cookie → 包装器直接回 **200 + Set-Cookie + `meta refresh` 回原路径**（跳板页；**不用 3xx**——重定向响应里新设的 cookie 在 Safari/Firefox 上不会带给重定向目标，303 补签会被逐跳重放直到 `ERR_TOO_MANY_REDIRECTS`，见 PR #31 / issue #30），下一请求即过原生闸门；**非导航 GET/HEAD**（fetch/EventSource，`sec-fetch-mode` 非 `navigate`/`nested-navigate`）仍走 **303** 单跳（fetch 类客户端透明跟随）；**RPC（POST）** 不跳（303 会把 POST 变 GET），转发下游（浏览器已从页面跳拿到 cookie）。
 - **未认证的页面导航** → 302 `/login`（上游只会回 401 纯文本，丑）；未认证 RPC/静态资源 → 401。
 - **secret 缺席竞态**：connection 插件激活时才建 secret，可能晚于本插件——secret 缺席时本次不补签、下请求重试；**绝不自己创建**（密钥归上游）。缓存按 credentials 服务实例做 WeakMap，实例更换（重启/重装）自动失效。
-- **补签是强耦合点**：cookie 格式、名称算法、存储 key 任一上游变更都要跟——升级 dsh 后第一步 diff `browser-auth.ts`（`docs/upgrade-dsh-0.1.2-playbook.md` 观察哨；0.1.5-rc.1 已逐项核查零变更，见 `docs/upgrade-dsh-0.1.5-playbook.md`；0.1.5-rc.2 经 npm tarball 产物对比确认与 rc.1 零代码差异；**0.1.7-rc.1 源码 diff 仅 303 重定向目标 `'/'` → `'./'`，cookie 面零变更，并在隔离实例上实测补签通过**，见 `docs/upgrade-dsh-0.1.7-playbook.md`）。
-- **`dsh_sid` 仍是唯一认证边界**：只带原生 cookie 不带 `dsh_sid` 的请求照样拒绝——原生 cookie 无账号、30 天不可撤销，登出/改密/`auth-reset` 的可撤销性全靠包装器兜住。登出响应除清 `dsh_sid` 外追加 `Max-Age=0` 的同名原生 cookie（名字可算、不需 secret）。
+- **补签是强耦合点**：cookie 格式、名称算法、存储 key 任一上游变更都要跟——升级 dsh 后第一步 diff `browser-auth.ts`（`docs/upgrade-dsh-0.1.2-playbook.md` 观察哨；0.1.5-rc.1 已逐项核查零变更，见 `docs/upgrade-dsh-0.1.5-playbook.md`；0.1.5-rc.2 经 npm tarball 产物对比确认与 rc.1 零代码差异；**0.1.7-rc.1 源码 diff 仅 303 重定向目标 `'/'` → `'./'`，cookie 面零变更，并在隔离实例上实测补签通过**，见 `docs/upgrade-dsh-0.1.7-playbook.md`；**0.2.0-rc.1 对 0.1.7-rc.1 零 diff**（`browser-auth.ts`/`rpc-host.ts`/`api-request-trust.ts` 全程零变更，隔离实例实测补签/登出 Max-Age=0 通过，见 `docs/upgrade-dsh-0.2.0-playbook.md`））。
+- **`dsh_sid` 仍是唯一认证边界**：只带原生 cookie 不带 `dsh_sid` 的请求照样拒绝——原生 cookie 无账号、30 天不可撤销，登出/改密/`auth-reset` 的可撤销性全靠本插件的会话层兜住（注册包装器 + `connection/request` waterfall 双层，见 `auth-mechanics.md`「路由保护顺序」）。登出响应除清 `dsh_sid` 外追加 `Max-Age=0` 的同名原生 cookie（名字可算、不需 secret）。
 
 ## 「浏览器端 scope gate」isLoopback 覆盖——0.1.2 换用 transport hook（重要）
 

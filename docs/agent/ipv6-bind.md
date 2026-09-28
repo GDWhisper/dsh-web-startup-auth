@@ -62,6 +62,8 @@
 4. **diff `dsh-client-connection` 的 `parseAuthority` / `isTrustedAuthority` / `assertTrustedAuthority`**：IPv6 方括号规范化、「无端口条目匹配任意端口」与「条目必须 WHATWG 解析不改写」是我们 `lanHosts` 输出 shape（规范拼写 + 方括号 + 无端口）的三条依据。
 5. **`!!js` 表达式的注入门禁**：上游若改 cordis 的 `ctx.<service>` 访问语义，`connection` 行的 `webLanHosts` 注入可能不再足够（或不再必要）——症状是启动时 `cannot get property ... without inject` 或表达式静默取空。
 
+> **0.2.0-rc.1 观察哨已跑（2026-09-28）**：哨 1–5 全部无触发——`webserver/src/index.ts`（含 `Config.host` union）逐字零 diff、`resolveLanTrust` 仍 IPv4-only、围栏三函数零 diff、`vendor/` cordis 零 diff；**清理清单不启动**。`--host ::` 双实例拓宽（哨 2）与围栏 403/401 分界（陌生 Host 403、双栈 IPv4 LAN 401）隔离实例实测通过，见 `docs/upgrade-dsh-0.2.0-playbook.md`「B」。
+
 ## 实机验收（E2E 记录，2026-09-27，dsh 0.1.7-rc.1 + 本插件 link）
 
 隔离实例 `DSH_WEB_AUTH_FILE=/tmp/.../web-auth.json`，`dsh web --host :: --port 3111 --no-open`：

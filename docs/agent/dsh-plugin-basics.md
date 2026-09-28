@@ -86,7 +86,8 @@ dsh --profile web --dump-config            # 打印组合后的完整插件树�
 
 - `add .` 是 `link:` 安装，改源码+重建即生效，不用重装；但**插件目录改名/移动后必须重新 add**。
 - 包若未发布到 npm，`add <包名>` 会失败——未发布只能用本地路径/tarball。
-- 源码安装（git clone）后必须 `npm install && npm run build`，因为 `lib/` 构建产物不入库。
+- 源码安装（git clone）后必须 `npm install && npm run build`，确保 `lib/` 产物与源码一致——`lib/` 是入库的，但克隆到的产物可能过期，源码改动后不重建提交就会发出旧产物（AGENTS 红线 3）。
+- **版本门槛（peerDependencies）**：dsh 的插件加载器（`plugin-compatibility.ts`）求值插件 `peerDependencies` 里所有 `@deepseek-ai/dsh*` 范围（`workspace:^|~|*` 按运行时版本解释；semver 求值带 `includePrerelease`），不满足的 bundle **直接跳过并打印原因**（`skipping profile bundle …`），profile 的 version exemption 可强行放行。本插件声明 `"@deepseek-ai/dsh": ">=0.1.7-rc.1 <0.3.0-0"`，拼写由 `tests/package-manifest.spec.ts` 钉死——**`-0` 后缀是必须的**：裸 `<0.3.0` 在 includePrerelease 下会放行 `0.3.0-rc.x`（0.2.0 审查时用 dsh CLI 内置 semver 实测）。同一 peer 必须标 `peerDependenciesMeta.optional`，否则 npm 7+/pnpm 8+ 会把整个 `@deepseek-ai/dsh` CLI（500+ 包）自动拖进 profile 的 `node_modules`。**每跨一条 minor 线（如 0.3.0-rc.1 出现）：先完成适配再放宽范围**，否则插件被整包跳过——这是刻意的 fail-loud，好过在未验证的 dsh 上静默漂移。
 
 ## 排查技巧
 
