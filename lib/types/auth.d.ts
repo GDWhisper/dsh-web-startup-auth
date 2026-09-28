@@ -33,10 +33,21 @@
  */
 import type { Context } from '@deepseek-ai/cordis';
 import z from '@deepseek-ai/schemastery';
-import type { IncomingMessage } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 declare module '@deepseek-ai/cordis' {
     interface Context {
         webAuth?: WebAuthService;
+    }
+    interface Events {
+        /**
+         * Admit or wrap an authenticated shared API request (dsh-client-connection's
+         * `/api` bridge). Same shape as the upstream declaration in
+         * `packages/client/connection/src/index.ts`; declared locally because this
+         * plugin does not depend on that package. Dispatched as a waterfall AFTER
+         * upstream admission (trust fence + native-cookie check); a listener that
+         * does not call `next()` vetoes the remaining chain, including the bridge.
+         */
+        'connection/request'(request: IncomingMessage, response: ServerResponse, next: () => Promise<void>): Promise<void>;
     }
 }
 /** Stable Cordis plugin name. */

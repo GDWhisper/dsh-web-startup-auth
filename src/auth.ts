@@ -66,6 +66,17 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     webAuth?: WebAuthService
   }
+  interface Events {
+    /**
+     * Admit or wrap an authenticated shared API request (dsh-client-connection's
+     * `/api` bridge). Same shape as the upstream declaration in
+     * `packages/client/connection/src/index.ts`; declared locally because this
+     * plugin does not depend on that package. Dispatched as a waterfall AFTER
+     * upstream admission (trust fence + native-cookie check); a listener that
+     * does not call `next()` vetoes the remaining chain, including the bridge.
+     */
+    'connection/request'(request: IncomingMessage, response: ServerResponse, next: () => Promise<void>): Promise<void>
+  }
 }
 
 /** Stable Cordis plugin name. */
@@ -1337,8 +1348,11 @@ export function apply(ctx: Context, _config: Config): void {
   // ── 4. Wrap webServer.register / registerUpgrade to protect every route ──
   // dsh 0.1.2 gates `/api` behind `requestRejection = trust fence (403) +
   // native-cookie check (401)` and `index.html` behind `authorizeIndex`, with
-  // NO loopback exemption. This wrapper is the session boundary: every
-  // request must carry a valid `dsh_sid` (or be a genuine loopback request).
+  // NO loopback exemption. This wrapper is the deny-by-default session layer:
+  // every request must carry a valid `dsh_sid` (or be a genuine loopback
+  // request). For shared API requests the same boundary is re-enforced at the
+  // official `connection/request` waterfall (section 4b — the two layers are
+  // mutual insurance against either seam rotting silently).
   // A valid native cookie alone is NOT accepted here — that cookie is
   // stateless, lives 30 days, and cannot be revoked, so logout / password
   // change / auth-reset only revoke `dsh_sid`; the wrapper is what keeps
@@ -1511,6 +1525,46 @@ export function apply(ctx: Context, _config: Config): void {
   webServer.registerFallback = (handler: WebRoute['handler']) => {
     return originalRegisterFallback(wrapFallback(handler))
   }
+
+  // ── 4b. Shared-API session boundary at the official extension point ──────
+  // `connection/request` (upstream since 0.1.6-alpha.2; available on every dsh
+  // line this plugin tracks) is a waterfall dispatched by the connection
+  // plugin's `/api` route AFTER upstream admission (trust fence +
+  // native-cookie check) and before the shared API bridge. It is the one seam
+  // upstream explicitly documents for wrapping shared API requests, so the
+  // session boundary for `/api` is enforced HERE as well as at the
+  // registration wrapper above — deliberately twice:
+  //
+  // - The wrapper is the deny-by-default + mint layer: it answers first
+  //   (302 for page navigations, JSON 401 otherwise) and mints the native
+  //   cookie BEFORE the request would reach upstream's admission. Minting
+  //   cannot move here: by the time a waterfall listener runs, admission has
+  //   already demanded the native cookie this listener would be minting.
+  // - This listener is the authoritative revocability boundary for shared API
+  //   requests: a valid native cookie alone (30 days, stateless, unrevocable)
+  //   must never reach the bridge without a live `dsh_sid` (or genuine
+  //   loopback). If upstream ever reshapes route registration so the wrapper
+  //   silently stops wrapping, shared API requests still die here instead of
+  //   inheriting a native-cookie-only gate — and vice versa: if the waterfall
+  //   event is renamed away, the wrapper still guards every route.
+  //
+  // The mutual insurance covers the SHARED API only: the surfaces this
+  // waterfall cannot see (index fallback, upgrades, third-party channels) are
+  // wrapper-only, so a silent wrapper failure there falls back to upstream's
+  // native-cookie gate — revocability lost, which is exactly why the native
+  // cookie is never an API credential on its own. Keeping both seams healthy
+  // is the upgrade sentinels' job: diff this event's declaration and dispatch
+  // site on every dsh bump (docs/upgrade-dsh-0.2.0-playbook.md).
+  //
+  // Both layers share one predicate (`isAuthorized`), so there is a single
+  // source of truth for what "a session" means.
+  ctx.on('connection/request', async (request, response, next) => {
+    if (!isAuthorized(request)) {
+      jsonResponse(response, 401, { error: 'unauthorized' })
+      return
+    }
+    await next()
+  })
 
   // ── 5. Provide the auth service ───────────────────────────────────────────
   const service: WebAuthService = {

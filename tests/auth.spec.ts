@@ -83,6 +83,10 @@ function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = [], cr
     webServer.prefixes.set(route.path, route)
     routes.push(route)
   }
+  // Real cordis accumulates listeners per event and disposes by listener
+  // identity (vendor/cordis/src/events.ts) — mirror both, so a second
+  // listener for the same event cannot be silently dropped here.
+  const listeners = new Map<string, Array<(...args: never[]) => unknown>>()
   const ctx = {
     get: (key: string) => {
       if (key === 'webStartup') return { trustedHosts: [] }
@@ -91,6 +95,15 @@ function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = [], cr
     },
     provide: (key: string, value: unknown) => { provided.set(key, value) },
     effect: (fn: () => void) => { fn() },
+    on: (name: string, listener: (...args: never[]) => unknown) => {
+      const list = listeners.get(name) ?? []
+      list.push(listener)
+      listeners.set(name, list)
+      return () => {
+        const index = list.indexOf(listener)
+        if (index >= 0) list.splice(index, 1)
+      }
+    },
     webServer,
     logger: { info: () => {}, warn: () => {} },
   } as unknown as Context
@@ -99,6 +112,7 @@ function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = [], cr
     auth: provided.get('webAuth') as WebAuthService,
     routes,
     webServer,
+    listeners,
   }
 }
 
@@ -474,6 +488,107 @@ function expectValidNativeCookie(setCookie: string): { authority: string; issued
   const payload = JSON.parse(Buffer.from(body ?? '', 'base64url').toString('utf8'))
   return payload
 }
+
+describe('connection/request waterfall gate', () => {
+  type WaterfallListener = (req: IncomingMessage, res: ServerResponse, next: () => Promise<void>) => Promise<void>
+
+  /** The shared-API session listener web-auth registered on the events bus. */
+  function waterfallGate(listeners: Map<string, Array<(...args: never[]) => unknown>>): WaterfallListener {
+    const list = listeners.get('connection/request') ?? []
+    if (list.length === 0) throw new Error('connection/request listener not registered')
+    return list[0] as WaterfallListener
+  }
+
+  it('registers the shared-API gate on the events bus', () => {
+    const { listeners } = fakeWebAuthContext('0.0.0.0')
+    expect((listeners.get('connection/request') ?? []).length).toBe(1)
+  })
+
+  it('vetoes a session-less remote request before the bridge', async () => {
+    const { listeners } = fakeWebAuthContext('0.0.0.0')
+    const gate = waterfallGate(listeners)
+    const { captured, res } = jsonResponseCapture()
+    let bridged = false
+    await gate(
+      httpRequest({ host: '192.168.5.216:3080', ip: '192.168.5.216', method: 'POST' }),
+      res,
+      async () => { bridged = true },
+    )
+    expect(bridged).toBe(false)
+    expect(captured.statusCode).toBe(401)
+    expect(JSON.parse(captured.body)).toEqual({ error: 'unauthorized' })
+  })
+
+  it('rejects a native-cookie-only request — the cookie is not a session', async () => {
+    // Upstream admission (trust fence + native-cookie check) has already
+    // accepted this request by the time the waterfall fires; the entire point
+    // of the gate is that it still dies here, so a leaked 30-day stateless
+    // cookie never becomes API access without a revocable `dsh_sid`.
+    const { listeners } = fakeWebAuthContext('0.0.0.0')
+    const gate = waterfallGate(listeners)
+    const { captured, res } = jsonResponseCapture()
+    let bridged = false
+    await gate(
+      httpRequest({
+        host: '192.168.5.216:3080',
+        ip: '192.168.5.216',
+        method: 'POST',
+        cookie: 'dsh-auth-bIj9JGMIe1tJS8faTbR0ZZA4xQYFj=v1.eyJ2ZXJzaW9uIjoxfQ.c2lnbmF0dXJl',
+      }),
+      res,
+      async () => { bridged = true },
+    )
+    expect(bridged).toBe(false)
+    expect(captured.statusCode).toBe(401)
+  })
+
+  it('delegates a request with a live session to the bridge', async () => {
+    registerCredentials('admin', 'secret1')
+    const { listeners } = fakeWebAuthContext('0.0.0.0')
+    const gate = waterfallGate(listeners)
+    const { captured, res } = jsonResponseCapture()
+    let bridged = false
+    await gate(
+      httpRequest({ host: '192.168.5.216:3080', ip: '192.168.5.216', method: 'POST', cookie: sessionCookie('admin') }),
+      res,
+      async () => { bridged = true },
+    )
+    expect(bridged).toBe(true)
+    // next() ran (bridge reached) and the gate wrote nothing.
+    expect(captured.statusCode).toBe(0)
+  })
+
+  it('delegates a genuine loopback request', async () => {
+    const { listeners } = fakeWebAuthContext('127.0.0.1')
+    const gate = waterfallGate(listeners)
+    const { captured, res } = jsonResponseCapture()
+    let bridged = false
+    await gate(
+      httpRequest({ host: '127.0.0.1:3080', ip: '127.0.0.1', method: 'POST' }),
+      res,
+      async () => { bridged = true },
+    )
+    expect(bridged).toBe(true)
+    // next() ran (bridge reached) and the gate wrote nothing.
+    expect(captured.statusCode).toBe(0)
+  })
+
+  it('holds the line from loopback once requireLoopbackLogin is on', async () => {
+    registerCredentials('admin', 'secret1')
+    setRequireLoopbackLogin(true)
+    const { listeners } = fakeWebAuthContext('127.0.0.1')
+    const gate = waterfallGate(listeners)
+    const { captured, res } = jsonResponseCapture()
+    let bridged = false
+    await gate(
+      httpRequest({ host: '127.0.0.1:3080', ip: '127.0.0.1', method: 'POST' }),
+      res,
+      async () => { bridged = true },
+    )
+    expect(bridged).toBe(false)
+    expect(captured.statusCode).toBe(401)
+  })
+})
 
 describe('native browser-auth cookie bridge', () => {
   /** A downstream handler echoing success (mimics an authenticated page route). */
