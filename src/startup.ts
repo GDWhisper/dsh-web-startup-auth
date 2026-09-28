@@ -1,9 +1,11 @@
 /**
  * Remote-aware replacement for `@deepseek-ai/dsh-web-app/startup`.
  *
- * The only behavioral difference from the stock web-startup is that `--host
- * 0.0.0.0` is accepted (the stock plugin hard-rejects it for safety). Remote
- * exposure is expected to be covered by the paired `web-auth` plugin.
+ * The behavioral differences from the stock web-startup: `--host 0.0.0.0` is
+ * accepted (the stock plugin hard-rejects it for safety) and `--host ::` or
+ * any IPv6 literal works too (issue #35 — the stock webserver schema only
+ * allows the two IPv4 literals; `src/ipv6-shim.ts` widens it in place).
+ * Remote exposure is expected to be covered by the paired `web-auth` plugin.
  *
  * This plugin provides the same `webStartup` service (`'webStartup'`), so the
  * stock `webserver`, `web-runtime`, and `connection` rows resolve exactly as
@@ -21,6 +23,13 @@ import { createInterface } from 'node:readline'
 import type { Context } from '@deepseek-ai/cordis'
 import { parseCmdline } from '@deepseek-ai/dsh-cmdline'
 import { hasCredentials, updateCredentials, normalizeUsername, MIN_PASSWORD_LENGTH } from './credential-store.ts'
+import {
+  ensureIpv6BindSupport,
+  isIpv6Host,
+  lanHosts,
+  normalizeBindHost,
+  LAN_HOSTS_SERVICE,
+} from './ipv6-shim.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -71,7 +80,7 @@ function webCommand(): Command {
     .name('dsh --profile web')
     .description('Serve the DeepSeek Harness browser UI (remote-capable).')
     .helpOption('-h, --help', 'show this help')
-    .option('--host <host>', 'bind host (0.0.0.0 allowed when the auth plugin is configured)')
+    .option('--host <host>', 'bind host; 0.0.0.0 (all IPv4 interfaces), :: (all interfaces, IPv6 + IPv4-mapped on dual-stack Linux), or any IP literal')
     .option('--no-open', 'do not open the Web UI in the default browser')
     .option('--port <port>', 'listen port; pass 0 to let the OS pick a free one')
     .option('--trusted-host <authority...>', 'passthrough for the stock startup\'s browser-trust authorities (kept for CLI compatibility; not consulted by web-auth — sessions cover all remote clients)')
@@ -79,7 +88,8 @@ function webCommand(): Command {
 Examples:
   dsh --profile web                          serve on the composed host and port
   dsh --profile web --no-open                serve without opening a browser
-  dsh --profile web --host 0.0.0.0 --port 8080   serve on all interfaces (requires auth)
+  dsh --profile web --host 0.0.0.0 --port 8080   serve on all IPv4 interfaces (requires auth)
+  dsh --profile web --host :: --port 8080    serve on all interfaces over IPv6 (dual-stack where bindv6only=0; requires auth)
   dsh --profile web auth-reset               reset the web-auth password (invalidates all sessions)
   dsh --profile web auth-reset --username alice   change the administrator username (invalidates all sessions)
 `)
@@ -167,20 +177,55 @@ export async function runAuthReset(options: AuthResetOptions): Promise<string> {
 }
 
 /**
+ * Read the cordis context's base URL (the profile root at boot), the base
+ * from which the `webserver` row resolves the package whose schema the boot
+ * path validates against.
+ * @param ctx - plugin context carrying the command line.
+ */
+function ctxBaseUrl(ctx: Context): string | undefined {
+  if ('baseUrl' in ctx) {
+    const base = ctx.baseUrl
+    if (typeof base === 'string') return base
+  }
+  return undefined
+}
+
+/**
  * Parse and provide the Web invocation. Unlike the stock web-startup, this
  * does NOT reject `--host 0.0.0.0`; remote security is the auth plugin's job.
+ * `--host ::` (and any IPv6 literal) is accepted too — the stock webserver
+ * schema is widened in place here, before the `webserver` row (which injects
+ * `webStartup`) can validate against it.
+ *
+ * Also provides `webLanHosts`, the helper our cordis patch concatenates
+ * into the `connection` row's `trustedHosts`: the stock LAN derivation
+ * enumerates IPv4 interfaces only, and only for the `0.0.0.0` bind, while the
+ * browser-trust fence rejects a non-loopback `Host` (403) unless listed.
  * @param ctx - plugin context carrying the command line.
  */
 export function apply(ctx: Context): void {
+  const ipv6BindSupported = ensureIpv6BindSupport(ctxBaseUrl(ctx))
+  ctx.provide(LAN_HOSTS_SERVICE, lanHosts)
   const program = webCommand()
   program.action(() => {
     const options = program.opts<WebOptions>()
     if (options.port !== undefined && !/^\d+$/.test(options.port)) {
       program.error(`error: --port must be a number, got ${JSON.stringify(options.port)}`)
     }
+    let host: string | undefined
+    if (options.host !== undefined) {
+      try {
+        host = normalizeBindHost(options.host)
+      } catch (error) {
+        program.error(`error: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+    if (host !== undefined && isIpv6Host(host) && !ipv6BindSupported) {
+      program.error('error: 当前 dsh 版本不支持 IPv6 绑定（无法扩展 webserver 的 host 配置）；请升级 dsh，或改用 --host 0.0.0.0')
+    }
     ctx.provide(WEB_STARTUP_SERVICE, {
       openBrowser: options.open,
-      ...options.host !== undefined && { host: options.host },
+      ...host !== undefined && { host },
       ...options.port !== undefined && { port: Number(options.port) },
       trustedHosts: options.trustedHost ?? [],
     } satisfies WebStartupValues)

@@ -14,7 +14,17 @@
   disabled: true
 
 - id: connection
-  inject: [webServer, webRuntime, webAuth]
+  # webLanHosts is required by the trustedHosts expression below: cordis
+  # gates ctx.<service> access on inject declarations (ungated access throws).
+  inject: [webServer, webRuntime, webAuth, webLanHosts]
+  config:
+    # web-app's own expression derives LAN IPv4 literals from the active bind
+    # plus --trusted-host extras; we keep it and append what it can never
+    # produce: the IPv6 authorities, and — on the dual-stack `::` bind, whose
+    # socket answers IPv4-mapped clients too — the IPv4 literals resolveLanTrust
+    # only derives for `0.0.0.0` (issue #35). Entries are bracketed/plain
+    # authorities matching the fence's WHATWG-form hostname normalization.
+    trustedHosts: !!js "[...ctx.webRuntime.trustedHosts, ...ctx.webLanHosts?.(ctx.webServer.host) ?? []]"
 
 - insert:
     - id: dsh-web-startup-auth

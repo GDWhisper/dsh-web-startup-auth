@@ -93,6 +93,15 @@ web-app 本次新增 `await auditStartupEntries(connectionCtx.root, 'dsh web', �
 - Node engine `^22.19.0 || >=24.0.0`；React 仍 `^18.2.0`（与我们 peerDependencies 一致，上游没有跳到 19）；
 - 0.1.5-rc.3（当前 `latest`）相对 rc.2 **只有 package.json 版本号变化**（无源码 diff）→ 停在 rc.2 基线的用户无需为 rc.3 做任何事。
 
+### 15. webserver `host` schema 与本插件的 IPv6 拓宽 ——⚠️ 升级后第一站（v0.1.12 新增，#35）
+
+`src/ipv6-shim.ts` 用 `createRequire` 从 `ctx.baseUrl`（profile 根）解析出**启动路径那一份** `@deepseek-ai/dsh-host-webserver`，原地替换其 `Config.dict.host`（union 加「IPv6 字面量」transform 成员）；`cordis.patch.yml` 的 `connection` 行注入 `webLanHosts` 服务并在 `trustedHosts` 表达式里拼接 IPv6 LAN 权威（`resolveLanTrust` 只枚举 IPv4）。机制、E2E 记录与清理清单见 `docs/agent/ipv6-bind.md`。升级后按序核：
+
+1. diff `packages/host/webserver/src/index.ts` 的 `Config.host`/`dict`/`~standard` 形状 → 形状变则 widen 探测失败（`--host ::` 报人话错误、其他用户无感），需适配；**上游若放开 host 值域（任意 IP 字面量）**，按文档「升级观察哨」清理清单删 shim、`connection` 表达式与注入回退。
+2. **双实例分歧**：仓库 `node_modules` 的包 ≠ profile 根解析出的包（本机是 dsh CLI 内嵌副本）。单测 widening 只作用于仓库那份——「`::` 能启动」只有 E2E 能证明（第一版正是死在这里：单测全绿、启动 schema 报错照旧）。
+3. diff `dsh-web-app` 的 `resolveLanTrust`（开始枚举 IPv6 则可简化我们的补齐）与 `dsh-client-connection` 的 `parseAuthority`/`isTrustedAuthority`/`assertTrustedAuthority`（方括号 + 规范拼写 + 无端口条目 shape 的三条依据；装载期断言要求条目「WHATWG 解析不改写」，非规范拼写条目会让 connection 行激活即抛）。
+4. `npx vitest run tests/ipv6-shim.spec.ts` + `--host ::` 实机（打 `/api/rpc` **POST** + 会话：本机 IPv6 Host → 401 过围栏、陌生 IPv6 Host → 403；`0.0.0.0` LAN IPv4 回归 + IPv6 Host 403）。
+
 ## 实机验证记录（2026-09-23，dsh 0.1.7-rc.1）
 
 ### A. 构建探针（临时副本，不动本仓库）

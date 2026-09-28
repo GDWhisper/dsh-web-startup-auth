@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
+import { isIPv4, isIPv6 } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Context } from '@deepseek-ai/cordis'
@@ -122,6 +123,34 @@ describe('remote web-startup', () => {
   it('does not provide webStartup when the auth-reset subcommand is invoked', async () => {
     const ctx = await runAuthResetCli(['auth-reset', '--password', 'supersecret2'])
     expect(ctx.get(WEB_STARTUP_SERVICE)).toBeUndefined()
+  })
+
+  it('accepts --host :: and normalizes the bracketed form', () => {
+    const ctx = makeFakeContext()
+    expect(runStartup(ctx, ['--host', '::', '--port', '8080']).error).toBeUndefined()
+    const values = ctx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined
+    expect(values?.host).toBe('::')
+
+    const bracketed = makeFakeContext()
+    expect(runStartup(bracketed, ['--host', '[::1]']).error).toBeUndefined()
+    expect((bracketed.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined)?.host).toBe('::1')
+
+    // non-canonical spellings reach the webserver config canonically
+    const expanded = makeFakeContext()
+    expect(runStartup(expanded, ['--host', 'fd00:0:0:0:0:0:0:1']).error).toBeUndefined()
+    expect((expanded.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined)?.host).toBe('fd00::1')
+  })
+
+  it('provides the LAN-host helper the cordis patch consumes', () => {
+    const ctx = makeFakeContext()
+    runStartup(ctx, ['--host', '::'])
+    const helper = ctx.get('webLanHosts') as ((host: string | undefined) => string[]) | undefined
+    expect(typeof helper).toBe('function')
+    expect(helper?.('0.0.0.0')).toEqual([])
+    for (const host of helper?.('::') ?? []) {
+      const literal = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
+      expect(isIPv6(literal) || isIPv4(literal), host).toBe(true)
+    }
   })
 })
 

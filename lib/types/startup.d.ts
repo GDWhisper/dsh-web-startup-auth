@@ -1,9 +1,11 @@
 /**
  * Remote-aware replacement for `@deepseek-ai/dsh-web-app/startup`.
  *
- * The only behavioral difference from the stock web-startup is that `--host
- * 0.0.0.0` is accepted (the stock plugin hard-rejects it for safety). Remote
- * exposure is expected to be covered by the paired `web-auth` plugin.
+ * The behavioral differences from the stock web-startup: `--host 0.0.0.0` is
+ * accepted (the stock plugin hard-rejects it for safety) and `--host ::` or
+ * any IPv6 literal works too (issue #35 — the stock webserver schema only
+ * allows the two IPv4 literals; `src/ipv6-shim.ts` widens it in place).
+ * Remote exposure is expected to be covered by the paired `web-auth` plugin.
  *
  * This plugin provides the same `webStartup` service (`'webStartup'`), so the
  * stock `webserver`, `web-runtime`, and `connection` rows resolve exactly as
@@ -63,6 +65,14 @@ export declare function runAuthReset(options: AuthResetOptions): Promise<string>
 /**
  * Parse and provide the Web invocation. Unlike the stock web-startup, this
  * does NOT reject `--host 0.0.0.0`; remote security is the auth plugin's job.
+ * `--host ::` (and any IPv6 literal) is accepted too — the stock webserver
+ * schema is widened in place here, before the `webserver` row (which injects
+ * `webStartup`) can validate against it.
+ *
+ * Also provides `webLanHosts`, the helper our cordis patch concatenates
+ * into the `connection` row's `trustedHosts`: the stock LAN derivation
+ * enumerates IPv4 interfaces only, and only for the `0.0.0.0` bind, while the
+ * browser-trust fence rejects a non-loopback `Host` (403) unless listed.
  * @param ctx - plugin context carrying the command line.
  */
 export declare function apply(ctx: Context): void;

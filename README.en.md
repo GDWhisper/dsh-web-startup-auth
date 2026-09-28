@@ -12,7 +12,7 @@ The stock `@deepseek-ai/dsh-web-app/startup` **hard-rejects `--host 0.0.0.0`** f
 
 ## Features
 
-- **Remote startup**: `--host 0.0.0.0` works, replacing the stock launcher's hard rejection.
+- **Remote startup**: `--host 0.0.0.0` works, replacing the stock launcher's hard rejection; `--host ::` (or any IPv6 literal, e.g. `::1`, `fd00::1`) works too (#35; non-canonical spellings are canonicalized, zone-suffixed (`%eth0`) and IPv4-mapped (`::ffff:a.b.c.d`) ones are refused). On a pure-IPv6 network `0.0.0.0` binds IPv4 only and the GUI is unreachable; `::` is dual-stack on Linux (`net.ipv6.bindv6only=0`) and covers both IPv6 and IPv4-mapped peers; on `bindv6only=1` systems `::` is IPv6-only.
 - **Login/register page**: A remote first visit guides you through setting the admin credentials, then shows the login page; matches DSH's black/white/blue style.
 - **Password-free local access**: the decision is made per **request**, not per bind address — a request is trusted only when its TCP peer address *and* its `Host` header are both loopback. A browser on the same machine opening `http://127.0.0.1:<port>/` needs no registration or login; LAN clients and requests forwarded by a reverse proxy (`Host` names the public domain) always need a session.
 - **Optional human verification (slider puzzle)**: **a bot check that does nothing much, added at a reader's request — feel free to turn it on and see XD.** Flip it on under **Settings → Auth → Human verification** and a login will ask you to drag a piece into the slot. Each image shows **two holes**: the piece and the real hole share **the same shape** (the tab side is drawn fresh per puzzle — right, left, top, bottom, or no tab at all, 5 in all), while the decoy's shape is always different — the piece only fits the hole with the same shape (pure decoration; scripts sail past it anyway).
@@ -47,6 +47,8 @@ Start:
 
 ```sh
 dsh web --host 0.0.0.0
+# pure IPv6 networks (or to cover IPv6 too):
+dsh web --host :: --port 8080
 ```
 
 > Or, if applying the patch manually with `--patch ./cordis.patch.yml`:
@@ -54,7 +56,7 @@ dsh web --host 0.0.0.0
 
 ## Usage
 
-1. Open `http://<host-ip>:<port>/` in a browser (from the same machine use `http://127.0.0.1:<port>/`, which needs no login).
+1. Open `http://<host-ip>:<port>/` in a browser (from the same machine use `http://127.0.0.1:<port>/`, which needs no login). IPv6 addresses must be bracketed in URLs: `http://[<ipv6-address>]:<port>/`. Note: with `--host ::` the terminal prints only the loopback URL (upstream LAN derivation enumerates IPv4 only), so build LAN IPv6 URLs by hand in the bracketed form. The printed loopback URL is always `http://127.0.0.1:<port>/` (upstream hardcodes it); on `bindv6only=1` systems a `::` bind is an IPv6-only socket and that URL is dead — use `http://[::1]:<port>/` locally.
 2. A remote first visit redirects to `/login`, showing the "set admin credentials" registration form.
 3. After registering you are auto-logged-in and land in the UI; subsequent visits require login.
 4. Sign out / change username / change password / adjust the session lifetime / turn the slider puzzle on or off: open the **Settings panel → Auth** tab in the UI (there is also a standalone entry; `POST /api/auth/logout` clears the session cookie).
