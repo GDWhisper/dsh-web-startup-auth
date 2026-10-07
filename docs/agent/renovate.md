@@ -22,6 +22,6 @@
 ## 处理它的 PR
 
 - 分支 `renovate/*`、作者 `app/renovate`。本仓库**没有 PR 触发的 CI**（`publish.yml` 只在发布时跑），合并前必须本地验证：`npm install && npm run typecheck && npm test && npm run build`。major 更新要跑全链路。
-- **当前基线**：`vitest ^5`（lock 现 5.0.2，#33 已合）、CI/`@types/node` 为 **24**（`^24.13.4`，lock 现 24.19.0，#34 已合）、`typescript ^6.0.3`（对齐 harness，机器人给的 7.x 已拒）、`@deepseek-ai/dsh-*` `^0.2.0-rc.1`（跟 `next`）。
+- **当前基线**：`vitest ^5`（lock 现 5.0.3，#37 已合）、CI/`@types/node` 为 **24**（`^24.13.4`，lock 现 24.19.1，#38 已合）、`typescript ^6.0.3`（对齐 harness，机器人给的 7.x 已拒）、`@deepseek-ai/dsh-*` `^0.2.0-rc.1`（跟 `next`）。
 - **一次多个依赖 PR 时注意合并顺序**：它们的 `package.json` / `package-lock.json` 改动可能互相冲突（实测 #10 node + #12 vitest 能干净叠加，但 #11 typescript 最后合就同时冲突两处——它新增的 `@typescript/*` 条目块正好插在 #12 重写的 `@vitest/*` 区域里）。用 `git merge-tree --write-tree <a> <b>` 先试推演，冲突的那条改成手动 `npm install` 重生成 lock。合并后**务必在拉到的 main 上再跑一遍全链路**，不是只看单个 PR 的分支。
 - **注意**：`package-lock.json` 的 registry 指向 npmmirror 的问题尚未处理（用户决定暂缓）；若 Dashboard 出现大量 "Failed to look up" 条目，先怀疑它。
