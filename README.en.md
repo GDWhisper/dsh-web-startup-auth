@@ -71,6 +71,79 @@ Credentials and the session secret live in `$DSH_HOME/web-auth.json` (that is `~
 - **Change username / repair a username containing control characters**: `dsh --profile web auth-reset --username <new-username>` (can be combined with `--password`). Also rotates the session secret. Usernames are normalized at register/login/change time by stripping C0 control characters (0x00–0x1F) and DEL (0x7F) — if an older version already stored a DEL-polluted username verbatim, this command repairs it.
 - Fallback: delete the credential file (`$DSH_HOME/web-auth.json`, default `~/.dsh/web-auth.json`) and restart to re-register (also invalidates all sessions, but requires a restart).
 
+## FAQ
+
+**Q: How do I set up an account and password locally? Do I need to proxy to the public internet first?**
+
+No, a public proxy is not a prerequisite. The local machine is exempt from login by default (it does not redirect to the login page), so open `http://127.0.0.1:<port>/login` manually in your browser — when no account is registered yet, that page shows the registration form directly. Alternatively go to **Settings panel → Auth**, where the banner at the top ("No admin account configured yet") has a "Go set up an admin account" action. Note that the CLI command `dsh --profile web auth-reset` can only change the password/username of an existing account; it **cannot** be used to create an account for the first time.
+
+**Q: I want no login on the local machine but login required for remote access — is that possible?**
+
+That is the default behavior. **Settings panel → Auth → Login requirement** is off by default, meaning the local machine (a genuine loopback) is exempt from login; remote clients always need a session. Turning this switch on (requires an admin account to exist first) forces login on the local machine too, which suits a server shared by several people where other accounts on the same machine should not get a free pass. There is no "trusted hosts are exempt" switch, and `--trusted-host` plays no part in the auth decision.
+
+**Q: Forgot password / want to change my username?**
+
+```sh
+dsh --profile web auth-reset                      # interactive
+dsh --profile web auth-reset --password <new-password>   # non-interactive
+dsh --profile web auth-reset --username <new-username>
+```
+
+Each of these rotates the session secret, so every signed-in browser must sign in again. The fallback is to delete the credential file (`$DSH_HOME/web-auth.json`, default `~/.dsh/web-auth.json`) and restart to re-register — this **does not affect historical session data**.
+
+**Q: An endpoint returns 403 — is this plugin blocking it?**
+
+Auth failures from this plugin **only ever return 401 or redirect to the login page, never 403**. So when you see a 403, first look at the **shape of the response body** to locate the source:
+
+| Response body | Source | What to do |
+| --- | --- | --- |
+| 401, or the page is sent to `/login` | This plugin (invalid session) | Sign in again |
+| Plain text `forbidden` | Upstream dsh's Host trust fence | Check that your reverse proxy preserves the real `Host`; add `--trusted-host <domain>` if needed |
+| `{"error":"request-not-trusted"}` | A third-party plugin's own loopback restriction | See the next item |
+| `transport failure ... HTTP 403` | A third-party plugin's own loopback restriction | See the next item |
+
+**Q: Third-party plugins (such as dsh-im, dsh-workbuddy-connect) return 403 on the LAN?**
+
+That plugin applies a loopback restriction to **its own** endpoints (only `127.0.0.1` / `localhost` are allowed). It has nothing to do with this plugin or your server — this plugin only guards `/api/*` sessions and cannot reach routes other plugins mount on the webServer.
+
+- **dsh-im**: ships a switch. Add `rpcAuthority: trusted-host` to the profile's `cordis.patch.yml`; newer versions allow it by default, so usually no config is needed.
+- **Plugins without a switch** (such as `dsh-workbuddy-connect`): the only option is to file an issue on that plugin's repository asking for a configurable equivalent switch.
+
+A temporary workaround is to run an SSH port forward on your own computer so the browser reaches the server through a loopback address, which avoids triggering the restriction:
+
+```sh
+ssh -L 3080:127.0.0.1:3080 user@<server-IP>
+```
+
+Keep that window open and browse to `http://127.0.0.1:3080`. Note that in this mode every request carries a loopback Host and is treated as local access — **do not do this on an untrusted network**.
+
+**Q: The settings panel reports "loading the providers directory failed / settings are unavailable in this browser"?**
+
+The most common cause is **an old version is installed**. This symptom was fixed as far back as 0.1.1, and 0.1.5 changed the implementation (the settings panel now renders correctly for remote browsers). Check the version first:
+
+```sh
+dsh plugin --profile web add dsh-web-startup-auth@latest
+```
+
+**Always pass `@latest` when running `add`**: without it, pnpm keeps reusing the version written the first time, and later `update` calls cannot move it up (this has caused repeated debugging in the past).
+
+**Q: The plugin behaves oddly after upgrading dsh?**
+
+- Installed from source: after changing source code run `npm run build`, then restart `dsh web` (`lib/` is the checked-in build artifact; not building equals not changing).
+- Installed from npm: re-run the `add dsh-web-startup-auth@latest` command above.
+- This plugin supports dsh `>=0.1.7-rc.1` and does not support the 0.3.0+ version line. Outside that range dsh **skips this bundle and prints the reason in the startup log** (a deliberate fail-loud); search the startup log for `skipped` to confirm.
+
+**Q: The login page and the home page keep redirecting to each other / Safari reports `ERR_TOO_MANY_REDIRECTS`?**
+
+- Ping-pong between the home page and `/login`: fixed since 0.1.3 (0.1.2's auth decision only looked at startup flags and not at the request itself, which misjudged reverse-proxy setups).
+- On Safari / iOS the native-cookie re-signing redirect is replayed repeatedly: fixed since 0.1.11.
+
+If either still happens, first confirm you are on the latest version and clear the site's cookies.
+
+**Q: Can the slider puzzle stop scripts?**
+
+No. As stated in the "Features" section, the answer is drawn on the image and a script can read it in a few dozen lines. Treat it as an Easter egg, not a security boundary.
+
 ## Index
 
 If you are looking for an out-of-the-box IDE built for the Agent era, check out [Omniterm](https://github.com/GDWhisper/OmniTerm)
