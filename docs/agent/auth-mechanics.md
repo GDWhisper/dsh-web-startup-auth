@@ -6,6 +6,8 @@
 
 密码用 scrypt（随机盐，64 字节）散列存 `$DSH_HOME/web-auth.json`（默认 `~/.dsh/`，含 `username` / `passwordHash` / `secret`）；会话 cookie `dsh_sid` = `base64url(JSON{u,e}).HMAC-SHA256(secret)`，14 天有效、`HttpOnly` + `SameSite=Lax`。`secret` 随机 32 字节，`auth-reset` 时轮换。
 
+**HTTPS 监听（0.2.1 的 `--tls-cert`/`--tls-key`）下追加 `; Secure`**：`secure = webServer.protocol === 'https:'`（0.2.0 线无 `protocol` → `false`，cookie 逐字节不变）。`dsh_sid` 与补签的原生 cookie 同步切换——set/clear 都带 `Secure`，原生 cookie 的 audience 从 host 变为完整 origin（见 `native-auth-bridge.md`）。
+
 **有效期可调**：档位常量在 `src/session-limits.ts`（3/7/14/30/60/90/180 天，默认 14，无 node 依赖——client bundle 由 tsdown 内联它），持久化为 `web-auth.json` 的 `sessionMaxAgeDays` 字段（`getSessionMaxAgeDays`/`setSessionMaxAgeDays`，模仿 `requireLoopbackLogin` 的单次写模式，不轮换 secret）；`auth.ts` 的 `getSessionMaxAgeSec()` 在 `sessionCookieSet`/`buildSessionCookie` 时运行时读值，因此**调整只对新签发的会话生效**（exp 在签发时写死进 payload）。端点 `/api/auth/session-max-age`（GET/POST，模仿 `/api/auth/policy`：需认证、未注册 400、非法档位 400）。
 
 ## 用户名净化（issue #14）
@@ -51,7 +53,7 @@
 
 会话边界在**两层**，刻意重复、互为保险（2026-09-28 起，可选改进 P4）：
 
-1. **注册包装层（默认拒绝 + mint）**：`web-auth` 在 `apply` 里同步包装 `webServer.register`/`registerUpgrade`/`registerFallback`，每个受保护请求先过 `isAuthorized`（未认证：页面导航 302 `/login`、其余 JSON 401），通过者缺原生 cookie 时先补签（见 `native-auth-bridge.md`）。所以 `cordis.patch.yml` 必须给 `connection` 行追加 `inject: [webAuth]`，保证 auth 插件在 connection 注册 API 路由**之前**激活——否则包装覆盖不到 `/api`。改动 patch 时保持这个注入，否则 API 不设防。
+1. **注册包装层（默认拒绝 + mint）**：`web-auth` 在 `apply` 里同步包装 `webServer.register`/`registerUpgrade`/`registerFallback`，每个受保护请求先过 `isAuthorized`（未认证：页面导航 302 `/login`、其余 JSON 401），通过者缺原生 cookie 时先补签（见 `native-auth-bridge.md`）。所以 `cordis.patch.yml` 必须给 `connection` 行保留 `inject: [webServer, webStartup, webAuth]`——`webAuth` 保证 auth 插件在 connection 注册 API 路由**之前**激活，否则包装覆盖不到 `/api`（API 不设防，安全红线）；`webStartup` 是 `trustedHosts: !!js ctx.webStartup.trustedHosts` 表达式访问的服务；`webServer` 是第三方 `connection.rpc.handle` / `connection.fetch.register` 消费方的必需项（connection 的 `register` 以调用方上下文跑 `owner.webServer.register(route)`，行 inject 少了它即抛 `cannot get property "webServer" without inject`，dsh-ntr 实测，双时代同样）。行级 `inject` 与模块自身 inject 是**并入**（但 patch 层之间是替换）——改动 patch 时三个都要保留，详见 `docs/agent/ipv6-bind.md`「connection 行走官方消费路径」。
 2. **共享 API 权威闸门（上游官方扩展点）**：`connection/request` waterfall（上游 0.1.6-alpha.2 引入、本插件跟踪的各版本线均有；connection 的 `/api` 路由在 `admit`＝信任围栏 403 + 原生 cookie 401 **之后**、bridge 之前派发）挂着第二个 `isAuthorized` 闸门：只带原生 cookie（30 天、无账号、不可撤销）而无 `dsh_sid` 的请求在此被拒（JSON 401），`next()` 不被调用，到不了 bridge。
 
 **为什么两层都要**：上游若改路由注册形态导致包装静默失效，**共享 API** 仍有 waterfall 闸门兜住（可撤销性不失守）；waterfall 事件若被上游改名/删除，包装层仍然守全量路由。但互备范围仅限共享 API：waterfall 看不见的面（index fallback、upgrade、第三方 channel）只有包装层在守，包装层若单独锈蚀，这些面退回到上游原生 cookie 闸门——按本插件威胁模型**可撤销性失守**（正是原生 cookie 不可单独当凭据的原因），另可能损失补签/302 等 UX。**mint 不能迁到 waterfall**：监听器运行时 `admit` 已经索取过原生 cookie（补签正是为它服务），而且非共享 API 的路由 waterfall 根本看不见。两层共享同一 `isAuthorized` 判定（单一事实源，不存在两套「什么算会话」的定义）。测试：`tests/auth.spec.ts` "connection/request waterfall gate"（含「仅原生 cookie 必须死在闸门」用例）与 `tests/waterfall-integration.spec.ts`（真实 cordis 事件总线派发）。
@@ -82,9 +84,9 @@
 
 ## 测试要点（`tests/`）
 
-- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`/api/auth/status` 的五种判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名 / **本机已注册但无会话：`authenticated:true` 而 `session:false`**，即退出登录后的本机状态）；认证端点（register/login/change-password/change-username：用户名净化、限速、密钥轮换、重签会话、旧/当前密码校验、同名 no-op 不轮换）；以及**原生 cookie 桥接**（0.1.2）：已认证页面导航缺原生 cookie → 200 跳板 + Set-Cookie + meta refresh 回原路径（非导航 GET 仍 303）、cookie 名随 authority（sha256）、值可 HMAC 校验对齐上游格式、回环免登录也补签、已带 cookie 直接转发、secret 缺席（fake provider 返回空）不 mint、非导航（POST RPC）不 303、未认证页面导航 → 302 /login、未认证 XHR → 401、登出清两 cookie、登录响应双 cookie。fake 的 `credentials` 服务通过 `fakeWebAuthContext(..., credentials)` 注入，secret 缓存按服务实例隔离（WeakMap）。
+- `tests/auth.spec.ts`：用 fake Context（mock `webServer`/`effect`）验证 `webAuth.authenticate`——真正回环请求放行、远程无 cookie 拒绝、有效 cookie 通过、过期 cookie 拒绝、同机反代（回环 IP + 公网 Host）需会话、伪造回环 Host 的远程请求不放行；`/api/auth/status` 的五种判定（本地未注册 / 反代未登录 / LAN 未登录 / 已登录带用户名 / **本机已注册但无会话：`authenticated:true` 而 `session:false`**，即退出登录后的本机状态）；认证端点（register/login/change-password/change-username：用户名净化、限速、密钥轮换、重签会话、旧/当前密码校验、同名 no-op 不轮换）；以及**原生 cookie 桥接**（0.1.2）：已认证页面导航缺原生 cookie → 200 跳板 + Set-Cookie + meta refresh 回原路径（非导航 GET 仍 303）、cookie 名随 audience（http 为 host、https 为 origin，均 sha256）、值可 HMAC 校验对齐上游格式、回环免登录也补签、已带 cookie 直接转发、secret 缺席（fake provider 返回空）不 mint、非导航（POST RPC）不 303、未认证页面导航 → 302 /login、未认证 XHR → 401、登出清两 cookie、登录响应双 cookie。**TLS 监听（`fakeWebAuthContext(..., protocol: 'https:')`）**：mint 的 audience 是 origin（默认端口 `:443` 剥离）、cookie 名 = origin 的 sha256、set/clear 全带 `; Secure`、已持 origin cookie 的请求不再重签。fake 的 `credentials` 服务通过 `fakeWebAuthContext(..., credentials)` 注入，secret 缓存按服务实例隔离（WeakMap）。
 - fake 请求**必须同时给 `socket.remoteAddress` 和 `headers.host`**——信任判定两个都读，缺一个就按远程处理（`requestWithCookie` / `httpRequest` / `jsonRequest` 默认给回环值）。
-- `tests/startup.spec.ts`：验证 `--host 0.0.0.0` 被接受、`webStartup` 服务值、`auth-reset` 子命令（改密/改用户名、密钥轮换、退出码）。
+- `tests/startup.spec.ts`：验证 `--host 0.0.0.0` 被接受、`webStartup` 服务值（**`trustedHosts` 富化**：`--trusted-host` 条目 + `lanHosts(host)` 推导）、`auth-reset` 子命令（改密/改用户名、密钥轮换、退出码）、`--public-url` 校验与 `--tls-cert`/`--tls-key` 成对检查；0.2.0 线（无 TLS 能力）上报「需要 dsh ≥ 0.2.1」——`program.error` 走 `ctx.appExit`，单测经 `exitCodes` 观测（fixture `baseUrl` 决定能力探测走哪份实例）。
 - `tests/challenge-store.spec.ts` / `tests/slider.spec.ts`：拼图验证（含几何自洽、二维容差边界、五种剪影轮换、纹理同源、缺口无描边、盲猜命中率）与全局退避台阶/回环豁免；清单见 `human-verification.md`。
 - 每个测试 `beforeEach` 用 `mkdtempSync` + `DSH_WEB_AUTH_FILE` 隔离凭据文件，`afterEach` 清理。
 - **注意**：`npm pack` / `npm publish` 会触发 `prepack`（typecheck + test + build 全跑），测试不过无法发布。

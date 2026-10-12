@@ -1,68 +1,106 @@
-# IPv6 绑定支持（issue #35）
+# 通配/IPv6 绑定支持（issue #35）
 
-> 覆盖：`--host ::` / 任意 IPv6 字面量、webserver host schema 拓宽、`connection` 信任围栏的 IPv6 LAN 权威、升级观察哨。改 `src/ipv6-shim.ts`、`src/startup.ts` 的 `--host` 处理或 `cordis.patch.yml` 的 `connection` 行前必读。
+> 覆盖：`--host 0.0.0.0` / `--host ::` / 任意具体 IP 字面量的启动路径、webserver host schema 拓宽、`webStartup.trustedHosts` 富化、`--public-url`/TLS 门禁、升级观察哨。改 `src/ipv6-shim.ts`、`src/startup.ts` 的 `--host`/TLS 处理或 `cordis.patch.yml` 的 `connection` 行前必读。
 
-## 诉求与两个墙
+## 两个时代与两堵墙
 
-纯 IPv6 网络（无可用 IPv4 路径）里 `--host 0.0.0.0` 不可达：`0.0.0.0` 是 IPv4 通配地址，Node 只绑 AF_INET。想改绑 `::` 撞两层墙：
+dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（本插件双时代兼容的主要对象）：
 
-1. **上游 schema**：`@deepseek-ai/dsh-host-webserver` 的 `WebServer.Config.host` 是 `z.union([z.const("127.0.0.1"), z.const("0.0.0.0")])`，web-app bundle patch 把 `ctx.webStartup.host ?? '127.0.0.1'` 原样喂进去——`::` 在启动时就是一次 schema 校验失败。Node 侧无阻碍（`listen(port, '::')` 原生支持；Linux `bindv6only=0` 时 `::` 双栈，实测同时响应 `127.0.0.1` 与 `::1`）。
-2. **信任围栏**：`dsh-client-connection` 的 `isTrustedApiRequest` 对「Host 不是回环且不在 `trustedHosts`」的请求直接拒（403）。IPv4 场景下这些 LAN 字面量由 web-app 的 `resolveLanTrust`（`dsh-web-app/lib/index.js`）自动枚举并写入 `connection` 的 `trustedHosts` 配置，但它**只枚举 IPv4**（`family === 'IPv4'`）且**只对 `0.0.0.0` 绑定**生效。只放 schema 不改围栏，纯 IPv6 客户端连登录页都到不了。
+| | 0.2.0 线（rc.2 基线） | 0.2.1 线（alpha.2 起） |
+|---|---|---|
+| `WebServer.Config.host` | `z.union([z.const('127.0.0.1'), z.const('0.0.0.0')])`：只收两个 IPv4 字面量，`::` 启动即 schema 校验失败 | `z.transform(z.string(), …具体 IP 字面量…).required()`：只收**一个具体** IPv4/IPv6 字面量，通配 `0.0.0.0`/`::` 被显式拒绝（plain `Error`：「binding every interface would expose remote code execution to the network」） |
+| LAN 信任推导 | web-app `resolveLanTrust`：仅 `0.0.0.0` 绑定 → 枚举非 internal IPv4 接口地址，写入 `webRuntime.trustedHosts`，`connection` 行经 `!!js ctx.webRuntime.trustedHosts` 消费 | 整体删除（`webRuntime` 服务也删了）：`connection` 行改 `inject: [webStartup]` + `!!js ctx.webStartup.trustedHosts`，**LAN 推导移进 webStartup 提供方**——stock 不再推导，本插件接管 |
+| 围栏（`isTrustedApiRequest`） | 回环 + `trustedHosts`，无绑定地址概念 | 新增 `isBindAddressAuthority`：监听方自己的绑定 IP（忽略端口）自动信任——**仅对具体绑定生效，通配仍无自动信任** |
 
-`isTrustedOrigin`（本插件 auth 侧）与原生 cookie 补签对 IPv6 是现成的：Host 头 `[::1]` 在 `LOOPBACK_HOSTNAMES` 里、`requestAuthority` 用 `new URL(...)` 规范化出方括号形式，与上游 `browser-auth.ts` 同一形状——auth/补签零改动。
+本插件的目标不变（#35 起）：通配绑定与任意本机 IP 字面量都能启动，且远程客户端能过上游信任围栏、到得了登录页。两堵墙各需一套手术，且**两个时代都不拆**：
+
+1. **schema 拓宽**：原地把 `Config.dict.host` 换成 `z.union([stock 成员, z.transform(z.string(), 任意 IPv4/IPv6 字面量断言)])`。
+2. **围栏权威**：`startup` 把 `[...--trusted-host 值, ...lanHosts(host)]` 富化进 `webStartup.trustedHosts`，`connection` 行经官方表达式消费。通配绑定两时代都仍需要它；具体 IPv4 绑定在 0.2.0 线围栏是刚需、在 0.2.1 线被 `isBindAddressAuthority` 覆盖（重复条目无害，保持两时代同一份代码）。
+
+`isTrustedOrigin`（本插件 auth 侧）与原生 cookie 补签对 IPv6 是现成的：Host 头 `[::1]` 在 `LOOPBACK_HOSTNAMES` 里、`requestAudience(headers, false)` 用 `new URL(...)` 规范化出方括号形式，与上游 `browser-auth.ts` 同一形状——auth/补签的 IPv6 路径零改动（0.2.1 的 secure 分支见 `native-auth-bridge.md`）。
 
 ## 三处改动
 
-### 1. `src/ipv6-shim.ts`：原地拓宽 schema（注意：是**启动路径那一份**）
+### 1. `src/ipv6-shim.ts`：schema 拓宽 + 绑定值域 + LAN 权威 + TLS 能力探测
 
-`WebServer.Config` 是 schemastery 对象 schema：`dict` 是普通可写对象，把成员 `dict.host` 换成 `z.union([原成员, z.transform(z.string(), isIPv6 断言)])` 即完成拓宽，`port` / `compression` 等其余字段的校验路径不变。
+**拓宽（`widenHostMember` / `ensureIpv6BindSupport`）**：
 
-- **为什么是原地换 `dict.host` 成员、不是替换 `WebServer.Config` 静态属性**：cordis 在 fiber 启动时读 `runtime.Config`（`resolveConfig` → `runtime.Config["~standard"].validate(config)`），运行期快照可能早于我们的 apply（快照持有的是 schema 对象引用本身）；替换静态属性对新旧引用生效时机不一，而改共享 schema 对象的 `dict.host` 成员对所有持有者立即生效。
-- **为什么不能包 `~standard`**：它是 `Schema.prototype` 上的 getter，每次访问生成新对象，实例上不可写。
-- **拓宽哪一份实例（E2E 抓到的坑，最重要）**：插件以 `link:` 装进 profile，本仓库 `node_modules` 里有一份 `@deepseek-ai/dsh-host-webserver`，而 `webserver` 行从 **profile 根**解析出的是**另一份**（本机是 dsh CLI 自带的嵌套副本）。两份 = 两个 `WebServer` 类 = 两个 schema 对象；拓宽 import 来的那份，启动时校验用的仍是 stock union（报错照旧），而单测看的是我们这份所以全绿。`ensureIpv6BindSupport(ctxBaseUrl(ctx))` 因此用 `createRequire(new URL('node_modules/.host-schema.cjs', baseUrl))` 从 **profile 根**解析并 `require`（Node ≥22.12 支持 require(esm)，与 row 的动态 import 同实例）那一份来拓宽；拿不到 baseUrl（单测）才回退到 import 的实例。**探测失败 → 返回 false → 只影响 IPv6 用户**（见下）。
-- **探测与降级**：`widenHostMember` 校验 `dict` / `z.union` / `z.transform` / `z.ValidationError` 的形态，任一项不满足返回 `false` 且**不动 schema**；成员上打 `Symbol` 标记保证同一 schema 只拓宽一次。进程内只尝试一次（模块级标志）。
-- `normalizeBindHost`：接受两个 IPv4 字面量与任意 IPv6 字面量（裸写或 URL 方括号形式 `[::1]`），**统一输出规范拼写**（`fd00:0:0:0:0:0:0:1` → `fd00::1`、`0:0:0:0:0:0:0:0` → `::`）——规范化是硬要求不是化妆：围栏对**每个** `trustedHosts` 条目做装载期断言（`dsh-client-connection` 的 `assertTrustedAuthority`：条目必须「WHATWG 解析不改写，大小写除外」），非规范拼写的条目会让 `connection` 行**激活即抛**、整树起不来；通配判定（`lanHosts` 的 `canonical === '::'`）同样吃规范拼写。另拒两类值：带 zone 的字面量（`fe80::1%eth0`，`isIPv6` 放行但 WHATWG 解析抛错）与 **IPv4-mapped**（`::ffff:192.168.1.5`——它按 IPv4 绑定，客户端的 `Host` 是 IPv4 裸形式，方括号 mapped 条目永远对不上，不如直说不让用）。DNS 名与畸形字面量照拒——只比 stock 多一个更好的人话报错。非法值在 commander action 里被接住并走 `program.error`（与 stock 拒绝 `0.0.0.0` 同一形态：一行错误 + exit 1；直接 throw 会变成「2 required plugins did not activate」的噪音堆栈，E2E 见过）。
-- `lanHosts(bindHost)`（服务名 `webLanHosts`）：补齐 stock `resolveLanTrust` 产不出来的围栏权威，且**绝不宽于套接字实际服务面**：`::`（Linux 双栈通配）→ 全部非内部接口地址（IPv6 方括号 + IPv4 裸写——双栈套接字同时接 IPv4-mapped 客户端，而 stock 的 IPv4 推导只对 `0.0.0.0` 生效，第一版漏了这条，实测 `::` 绑定下 IPv4 LAN 客户端 403）；其他 IPv6 字面量（`::1`/`fd00::5`）→ 就只有该绑定地址本身；非 IPv6 绑定 → `[]`（`0.0.0.0` 的 IPv4 LAN 权威 stock 自己会推，回环绑定不服务远程）。条目一律**规范拼写 + 方括号**（WHATWG hostname 形态，围栏 `parseAuthority` 产出并比较的就是它；且必须过 `assertTrustedAuthority` 的「解析不改写」断言，见 `normalizeBindHost` 条）；条目无端口，`isTrustedAuthority` 里匹配任意端口；`%zone` 后缀剥离（绑定地址与接口地址同规则）。接口枚举失败（`networkInterfaces()` 抛错）返回 `[]`——表达式直接展开这个列表，信任面收窄是 fail-closed，把 `connection` 激活炸掉不是。
+- `WebServer.Config` 是 schemastery 对象 schema，`dict` 是普通可写对象——把成员 `dict.host` 换成拓宽 union 即对**所有持有者**立即生效（fiber 启动时 `resolveConfig` 读的是 schema 对象引用本身，替换静态属性对新旧引用生效时机不一）。
+- 第二成员域是 `isIPv4(v) || isIPv6(v)`：0.2.1 的通配经 **union fallthrough** 命中它——schemastery 的 union 对成员抛出的**一切**错误都只是收集（`catch (error) { messages.push(error) }`），0.2.1 成员抛的 plain `Error` 不例外。这条兜底语义用「抛 plain Error 的 stock 成员」fixture 钉死在 `tests/ipv6-shim.spec.ts`；将来 schemastery 副本若收窄这个 catch，通配启动会立刻红（E2E）。
+- 新 union 成员必须**复制原成员的 `meta`**（尤其 `required`）：默认整的 union meta 为空，无 required 的 host 成员会让无 host 配置通过校验，object resolver 丢键后 `listen(port, undefined)` 绑全部接口。
+- **拓宽哪一份实例（E2E 抓到的坑，最重要）**：插件以 `link:` 装进 profile，本仓库 `node_modules` 里有一份 `@deepseek-ai/dsh-host-webserver`，而 `webserver` 行从 **profile 根**解析出的是**另一份**（本机是 dsh CLI 自带的嵌套副本）。两份 = 两个 `WebServer` 类 = 两个 schema 对象；拓宽 import 来的那份，启动时校验用的仍是 stock schema（报错照旧），而单测看的是我们这份所以全绿。`ensureIpv6BindSupport(ctxBaseUrl(ctx))` 因此用 `createRequire(new URL('node_modules/.host-schema.cjs', baseUrl))` 从 **profile 根**解析并 `require`（Node ≥22.12 支持 require(esm)，与 row 的动态 import 同实例）那一份来拓宽；拿不到 baseUrl（单测）才回退到 import 的实例。**探测失败 → 返回 false → `startup` 对扩展值报人话错误**（fail-closed；`--host 127.0.0.1` 户零影响）。
+- `widenHostMember` 校验 `dict` / `z.union` / `z.transform` / `z.ValidationError` 形态，任一项不满足返回 `false` 且**不动 schema**；成员上打 `Symbol` 标记保证同一 schema 只拓宽一次；进程内成功结果粘性（`ensureIpv6BindSupport` 模块级标志），失败不粘、后次可重试。
 
-### 2. `src/startup.ts`：接线
+**`normalizeBindHost`（`--host` 值域）**：`127.0.0.1`、`0.0.0.0` 透传，任意**具体 IPv4 字面量**透传（0.2.1 CLI 的值域；0.2.0 线顺带放行），任意 IPv6 字面量（裸写或 `[::1]` 方括号形式）**统一输出规范拼写**（`fd00:0:0:0:0:0:0:1` → `fd00::1`、`0:0:0:0:0:0:0:0` → `::`）。规范化是硬要求不是化妆：围栏对**每个** `trustedHosts` 条目做装载期断言（`assertTrustedAuthority`：条目必须「WHATWG 解析不改写，大小写除外」），非规范拼写的条目让 `connection` 行**激活即抛**、整树起不来；通配判定（`lanHosts` 的 `canonical === '::'`）同样吃规范拼写。另拒两类：带 zone 的字面量（`fe80::1%eth0`，`isIPv6` 放行但 WHATWG 解析抛错）与 **IPv4-mapped**（`::ffff:192.168.1.5`——按 IPv4 绑定，客户端 `Host` 是 IPv4 裸形式，方括号 mapped 条目永远对不上）。DNS 名与畸形字面量照拒。非法值在 commander action 里被接住走 `program.error`（一行错误 + exit 1，与 stock 拒绝同形态）。
 
-`apply()` 里先 `ensureIpv6BindSupport(ctxBaseUrl(ctx))`，再 `ctx.provide('webLanHosts', lanHosts)`，然后照旧建 commander。action 里 `normalizeBindHost(options.host)`；IPv6 且探测失败 → `program.error`（升级不兼容时的唯一可见失败，非 IPv6 用户零影响）。
+**`lanHosts(bindHost)`（围栏权威矩阵）**——补齐 stock 两时代都产不出的权威，且**绝不宽于套接字实际服务面**：
 
-**顺序保证**：`webserver` 行 `inject: [webStartup]`，我们的插件先于 webserver Service 激活，拓宽必在其配置校验之前生效；`connection` 行注入 `webServer`/`webRuntime`/`webAuth`/`webLanHosts`，全在我们之后。
+| 绑定 | 返回 | 理由 |
+|---|---|---|
+| `undefined` / `127.0.0.1` | `[]` | 回环绑定不服务远程、回环 Host 两时代围栏自带信任 |
+| `0.0.0.0` | 非 internal IPv4 接口地址（裸写），按枚举序 | 与 0.2.0 线 `resolveLanTrust` 逐字同语义（rc.2 上等值替换；0.2.1 上 stock 推导已删，靠我们） |
+| `::`（双栈通配） | 两个家族：IPv6 方括号 + IPv4 裸写 | 双栈套接字同时接 IPv4-mapped 客户端；stock 的 IPv4 推导只对 `0.0.0.0` 生效（第一版漏了 IPv4 面，实测 403 后补上） |
+| 其他具体 IPv4 | `[自身]`（裸写） | 0.2.0 线围栏无绑定自动信任，是刚需；0.2.1 线重复无害 |
+| 其他具体 IPv6 | `[自身]`（方括号规范拼写） | 同上 |
+| 非字面量 | `[]` | 不会走到（`--host` 已被 normalizeBindHost 把关） |
 
-### 3. `cordis.patch.yml`：围栏字面量
+条目一律**规范拼写 + 方括号（IPv6）+ 无端口**（WHATWG hostname 形态，围栏 `parseAuthority` 产出并比较的就是它；且必须过 `assertTrustedAuthority`）；`%zone` 后缀剥离（绑定地址与接口地址同规则）；接口枚举失败（`networkInterfaces()` 抛错）返回 `[]`——信任面收窄是 fail-closed，把 `connection` 激活炸掉不是。
 
-`connection` 行的 `trustedHosts` 覆盖为 web-app 原表达式 + IPv6 权威（上游注释许可的部署侧拼接范式）：
+**`supportsTlsConfig(baseUrl?)`（0.2.1 能力代理）**：`'tls' in bootWebServer(baseUrl)?.Config?.dict`——TLS 与 `--public-url` 同期上线，一个探测管两个 flag；**必须走 `bootWebServer` 的 profile 根解析**（同双实例坑），否则读到本仓库 rc.2 实例、门禁静默失效。
+
+### 2. `src/startup.ts`：接线（trustedHosts 富化 + 门禁）
+
+`apply()` 开头探测 `ensureIpv6BindSupport(ctxBaseUrl(ctx))` 与 `supportsTlsConfig(ctxBaseUrl(ctx))`，然后建 commander。action 里：
+
+- `normalizeBindHost(options.host)`；**非 `127.0.0.1` 且拓宽失败 → `program.error`**（升级不兼容时唯一可见失败；`127.0.0.1` 两时代 stock 都收，不设门禁）。
+- `--tls-cert`/`--tls-key` 必须成对（文案照搬上游 `must be supplied together`）、`--public-url` 经本地镜像 `parsePublicUrl` 校验（上游 `public-url.ts` 未导出子路径；升级先 re-diff，同补签镜像规矩）。
+- `tls`/`publicUrl` 存在而 `supportsTlsConfig` 为 false → `program.error`（rc.2 上「需要 dsh ≥ 0.2.1」——TLS flag 落在明文监听上是安全意外，不静默）。
+- `ctx.provide('webStartup', { …, trustedHosts: [...options.trustedHost ?? [], ...lanHosts(host)] })`——**富化后的完整权威表**，`--trusted-host` 值保持参数序在前。
+
+**顺序保证**：`webserver` 行 `inject: [webStartup]`，我们的插件先于 webserver Service 激活，拓宽必在其配置校验之前生效；`connection` 行注入 `webServer`/`webStartup`/`webAuth`，全在我们之后。`auth-reset` 子命令路径不 provide `webStartup`（`--help` 同）。
+
+### 3. `cordis.patch.yml`：connection 行走官方消费路径
 
 ```yaml
 - id: connection
-  inject: [webServer, webRuntime, webAuth, webLanHosts]
+  inject: [webServer, webStartup, webAuth]
   config:
-    trustedHosts: !!js "[...ctx.webRuntime.trustedHosts, ...ctx.webLanHosts?.(ctx.webServer.host) ?? []]"
+    trustedHosts: !!js ctx.webStartup.trustedHosts
 ```
 
-- **`inject` 里必须列 `webLanHosts`**：cordis 对 `!!js` 表达式里的 `ctx.<服务名>` 访问做注入门禁——没在 `inject` 里声明的服务，访问直接抛 `cannot get property "webLanHosts" without inject`（E2E 抓过：不加这行，`connection` 激活失败、树起不来）。`?.()` 只是表达式的诚实性兜底。
-- **表达式必须加双引号**：js-yaml 的普通标量不支持 `[` 开头与 `: `（`!!js` 是 `kind: "scalar"` 自定义 tag，先得过 YAML 解析），上游惯例见 `dsh-base/cordis.patch.yml` 的 `!!js "..."` 写法。
+- **表达式两时代同一份**：0.2.1 线上与 stock 行**逐字一致**（上游注释即本范式：「The listener's bind IP is accepted separately from this list.」）；0.2.0 线上取代 `[...ctx.webRuntime.trustedHosts, …]` 的旧表达式——`webRuntime` 消费消失，信任表由我们的 startup 提供（rc.2 上与原 `resolveLanTrust + --trusted-host` 结果等值）。
+- **`inject` 里必须列 `webStartup`**：cordis 对 `!!js` 表达式里的 `ctx.<服务名>` 访问做注入门禁——没在 `inject` 声明的服务访问直接抛 `cannot get property ... without inject`（E2E 抓过）。**`webAuth` 是排序红线**：保证 auth 插件在 connection 注册 API 路由之前激活（不设防与设防的区别，见 `auth-mechanics.md`「路由保护顺序」）。
+- **`inject` 里必须列 `webServer`（E2E 抓出的回归，2026-10-12）**：connection 的 `HostConnectionService.register` 对**调用方上下文**执行 `owner.webServer.register(route)`，该属性访问按 connection 行的 inject 作用域过门禁——行里少了 `webServer`，第三方 `connection.rpc.handle` / `connection.fetch.register` 消费方（如 dsh-ntr，模块自身 `inject = ['webServer', 'connection']` 也救不了）激活即抛 `cannot get property "webServer" without inject`（connection lib 的 `register` 栈帧）。rc.2 与 0.2.1-alpha.2 双时代实测同样；**alpha.2 stock 行 `inject: [webStartup]` 同样有此缺口**，我们比 stock 多修一处。
+- **行级 inject 与模块自身 inject 合并、非替换；patch 层之间则是替换**：loader 的 `Inject.resolve(fiber.entry.options.inject, fiber.inject)` 把行声明并进 fiber 已有的 inject 表（connection 模块自身的 `inject = ['credentials']` 不受影响）；但 profile 用户 patch 对同一行再写 `inject` 会**整体替换** bundle 层的列表（2026-10-12 实测：用户 patch 写 stock 形态 `[webStartup, webAuth]` → dsh-ntr 必炸）。三处（`webServer`/`webStartup`/`webAuth`）一个都不能少。
+- 表达式不带双引号是刻意的：js-yaml 普通标量只在 `[` 开头或含 `: ` 时才需要引号，`ctx.webStartup.trustedHosts` 两者皆无（上游 stock 同写法）。
 
 ## 行为边界（对用户）
 
-- `--host` 缺省 / `127.0.0.1` / `0.0.0.0`：**行为零变化**（schema 只是加成员，原两个值验证路径与返回原样）。
-- `--host ::`：双栈（Linux `bindv6only=0`）同时监听 IPv6 与 IPv4-mapped，比 `0.0.0.0` 覆盖更全；`bindv6only=1` 系统上仅 IPv6。`--host ::1` 只监听 IPv6 回环（本机 `http://[::1]:<端口>/`）。
-- `--host` 拼写：非规范 IPv6 拼写被规范化后放行（`fd00:0:0:0:0:0:0:1` ≡ `fd00::1`）；带 zone 的字面量与 IPv4-mapped（`::ffff:a.b.c.d`）拒绝（人话报错，理由见上文 `normalizeBindHost` 条）。
-- LAN URL 打印：上游 `resolveLanTrust` 只枚举 IPv4，`::` 启动时终端**只打印回环 URL**，局域网 IPv6 地址需用户按 `http://[<地址>]:<端口>/` 手动拼（README 已注明）。且回环 URL 是上游硬编码的 `http://127.0.0.1:<端口>/`（`localWebUrl`）：`bindv6only=1` 的系统上 `::` 是纯 IPv6 套接字，这个打印出来的 URL 本身也不通，用 `http://[::1]:<端口>/`。
-- 报错文案：host 的 schema 报错从两成员变三成员（末尾多 `| string`），只在启动失败时可见。
+- `--host` 缺省 / `127.0.0.1`：**行为零变化**。
+- `--host 0.0.0.0`：0.2.0 线信任表与原 `resolveLanTrust` 等值（我们接管了同一语义）；0.2.1 线恢复被 stock 拒绝的通配绑定。
+- `--host <具体 IPv4>`（如 `192.168.1.5`）：新值域，两时代可启动；0.2.1 线围栏自动信任该绑定地址本身。
+- `--host ::`：双栈（Linux `bindv6only=0`）同时监听 IPv6 与 IPv4-mapped，比 `0.0.0.0` 覆盖更全；`bindv6only=1` 系统上仅 IPv6。`--host ::1` 只监听 IPv6 回环（`http://[::1]:<端口>/`）。
+- `--host` 拼写：非规范 IPv6 被规范化后放行；带 zone 与 IPv4-mapped 拒绝。非法值一行人话错误 + exit 1。
+- `--public-url` / `--tls-cert`/`--tls-key`：**仅 0.2.1 线可用**；rc.2 上清晰报错（`需要 dsh >= 0.2.1`），绝不静默。TLS 监听上的 cookie 会带 `Secure` 且补签 audience 变 origin（`native-auth-bridge.md`）。
+- LAN URL 打印：`resolveLanTrust`（0.2.0 线）只枚举 IPv4，`::` 启动时终端**只打印回环 URL**，局域网 IPv6 地址需手动拼 `http://[<地址>]:<端口>/`（README 已注明）。回环 URL 是上游硬编码的 `http://127.0.0.1:<端口>/`：`bindv6only=1` 系统上这个打印出来的 URL 本身也不通，用 `http://[::1]:<端口>/`。
+- 报错文案：host 的 schema 报错末尾多一个 union 成员（`| string`），只在启动失败时可见。
 
 ## 升级观察哨（每次 bump dsh 先跑）
 
-1. **diff `packages/host/webserver/src/index.ts`**：`Config.host` 的 union 形状（`dict` 结构、`~standard` 入口）。形状变 → `widenHostMember` 返回 `false`，`--host ::` 报「当前 dsh 版本不支持 IPv6 绑定」。两个清理条件互相独立，别一起做：
-   - **上游放开 host 值域（接受任意 IP 字面量）** → 只删 `src/ipv6-shim.ts` 的 widen 部分（`widenHostMember`/`ensureIpv6BindSupport`/探测），`startup.ts` 的调用与探测失败分支一并去。
-   - **`resolveLanTrust` 开始推导 IPv6（见观察哨 3）** → 才删围栏部分：`connection` 表达式回退 `!!js ctx.webRuntime.trustedHosts`、注入里的 `webLanHosts`、`startup.ts` 的 provide。**只放开 schema 而围栏仍 IPv4-only 时删围栏部分 = 把本功能移除的墙原样装回**（LAN IPv6 客户端在登录页之前 403）。
-2. **两份实例的分歧**：`ctx.baseUrl`（profile 根）解析出的包 vs 本仓库 `node_modules` 的包。上游若改变 `webserver` 行的解析方式（不再从 profile 根解析），`ensureIpv6BindSupport` 的指路失效 → 表现是 schema 报错照旧（fail-closed，靠观察哨第 1 条的报错发现）。仓库依赖与 dsh CLI 内嵌副本版本漂移时同理。
-3. **diff `dsh-web-app` 的 `resolveLanTrust`**：它若开始枚举 IPv6（或对非 `0.0.0.0` 绑定也推导），我们的 `lanHosts` 可能与它重复/重复计数——重复条目无害（围栏是 `some` 匹配），但应同步简化。
-4. **diff `dsh-client-connection` 的 `parseAuthority` / `isTrustedAuthority` / `assertTrustedAuthority`**：IPv6 方括号规范化、「无端口条目匹配任意端口」与「条目必须 WHATWG 解析不改写」是我们 `lanHosts` 输出 shape（规范拼写 + 方括号 + 无端口）的三条依据。
-5. **`!!js` 表达式的注入门禁**：上游若改 cordis 的 `ctx.<service>` 访问语义，`connection` 行的 `webLanHosts` 注入可能不再足够（或不再必要）——症状是启动时 `cannot get property ... without inject` 或表达式静默取空。
+1. **diff `packages/host/webserver/src/index.ts` 的 `Config.host` 形状**（`dict` 结构、`~standard` 入口）：两种已知形状（0.2.0 union / 0.2.1 transform）都已在 `widenHostMember` 覆盖。形状再变 → widen 返回 `false` → 扩展 `--host` 报「当前 dsh 版本不支持」。**注意 0.2.1 的方向是明确收紧：widen 是永久特性，没有「上游放开后清理」的路径**（旧的清理清单期待已删除——本条目曾是它的载体）。
+2. **两份实例的分歧**：`ctx.baseUrl`（profile 根）解析出的包 vs 本仓库 `node_modules` 的包。上游若改 `webserver` 行的解析方式，`ensureIpv6BindSupport`/`supportsTlsConfig` 的指路失效 → 表现是 schema 报错照旧 / 门禁误报不可用（都 fail-closed，靠哨 1 与实机发现）。仓库依赖与 dsh CLI 内嵌副本版本漂移时同理。
+3. **diff `dsh-client-connection` 的围栏**（`api-request-trust.ts` 的 `parseAuthority`/`isTrustedAuthority`/`assertTrustedAuthority`/`isBindAddressAuthority`）：条目 shape（规范拼写 + 方括号 + 无端口 + 过装载期断言）的四条依据；`isBindAddressAuthority` 的具体绑定自动信任语义决定我们条目是否冗余（冗余不碍事，别删误判）。
+4. **diff web-app patch 的 `connection` 行**（`inject` 与 `trustedHosts` 表达式）：我们的行是 stock 行的逐字镜像（+`webAuth`）。stock 若改行形状，我们的 `cordis.patch.yml` 同步跟。
+5. **diff webserver 的 `Config.dict.tls` 成员与 webserver/web-runtime 行对 `webStartup.tls`/`publicUrl` 的消费**：`supportsTlsConfig` 探测与透传字段形状的依据（`tls` 成员被改名/移除 → 门禁失准）。
+6. **`!!js` 表达式的注入门禁语义**（cordis loader `Inject.resolve` + config 插值）：上游若改 `ctx.<service>` 访问语义或行级 inject 合并规则（哨 3 依赖「合并非替换」），`connection` 行症状是启动 `cannot get property ... without inject` 或表达式静默取空。
 
-> **0.2.0-rc.1 观察哨已跑（2026-09-28）**：哨 1–5 全部无触发——`webserver/src/index.ts`（含 `Config.host` union）逐字零 diff、`resolveLanTrust` 仍 IPv4-only、围栏三函数零 diff、`vendor/` cordis 零 diff；**清理清单不启动**。`--host ::` 双实例拓宽（哨 2）与围栏 403/401 分界（陌生 Host 403、双栈 IPv4 LAN 401）隔离实例实测通过，见 `docs/upgrade-dsh-0.2.0-playbook.md`「B」。
+> **0.2.0-rc.1 观察哨已跑（2026-09-28）**：哨 1–6（当时为 1–5 版）全部无触发——`webserver/src/index.ts`（含 `Config.host` union）逐字零 diff、`resolveLanTrust` 仍 IPv4-only、围栏三函数零 diff、`vendor/` cordis 零 diff；**清理清单不启动**。`--host ::` 双实例拓宽（哨 2）与围栏 403/401 分界（陌生 Host 403、双栈 IPv4 LAN 401）隔离实例实测通过，见 `docs/upgrade-dsh-0.2.0-playbook.md`「B」。
+>
+> **0.2.0-rc.2 观察哨已跑（2026-10-07）**：同样全部无触发——`webserver/src/index.ts`（含 `Config.host` union）对 `dsh-v0.2.0-rc.1` 零 diff，`resolveLanTrust` 仍是 IPv4-only，围栏三函数零 diff；`ensureIpv6BindSupport` 与 `lanHosts` 均不可拆。隔离实例实测：`--host ::` 正常启动 + 双栈围栏四项（`[::1]` 回环 401 / 陌生 `[2001:db8::99]` **403** / IPv4 LAN 401 / 本机全局 IPv6 401），见 `docs/upgrade-dsh-0.2.0-playbook.md` 的 rc.2 段落。
+>
+> **0.2.1-alpha.2 触发警报（2026-10-12，前瞻）**：master（=alpha.2）把 `Config.host` 换成「任意具体 IP 字面量的 `z.transform` + 通配硬拒」，并删除 `resolveLanTrust`/`webRuntime` 服务。哨 1/4/6 同时触发，且**不是清理而是返工**：哨 1 只满足一半（具体 IPv6 放开了、通配仍禁；当时 union 兜底只救 `::`，`0.0.0.0` 实测 schema `ValidationError`）；哨 4 变成整行重写（`webRuntime` 删除 → 旧表达式悬空，回环/`0.0.0.0`/`::` 三连败，插件完全无法启动）；stock 推导整体消失 → `lanHosts` 接管 `0.0.0.0` 侧。适配清单与落地记录见 `docs/upgrade-dsh-0.2.0-playbook.md`「0.2.1-alpha.2 前瞻审查」与「适配落地（双时代兼容）」。
+>
+> **适配已落地并通过双时代 E2E（2026-10-12）**：widen 第二成员域放宽为任意 IPv4/IPv6 字面量（union fallthrough 兜底，fixture 钉死）、`lanHosts` 补 `0.0.0.0`/具体 IPv4 行、`connection` 行落官方表达式（新增发现：inject 必须保留 `webServer`，见上「connection 行走官方消费路径」第 3 条；哨 3/6 的新验证点是 `isBindAddressAuthority` 与 patch 层替换语义）。实机结果见下节「双时代实机验收」。**注意哨 4 的含义已变**：我们的行不再是纯 stock 镜像——比 stock 多 `webServer`（修其缺口）与 `webAuth`（排序红线），diff 时勿把这两处当偏差删掉。
 
 ## 实机验收（E2E 记录，2026-09-27，dsh 0.1.7-rc.1 + 本插件 link）
 
@@ -76,9 +114,26 @@
 
 注意：`/api/auth/status` 等由本插件注册的路由**不经** `connection.admit`，探围栏必须打 `/api/rpc` 且用 **POST**（GET/HEAD 会被补签桥的 303 拦在围栏之前，根本到不了 `admit`）。
 
+## 双时代实机验收（E2E 记录，2026-10-12，rc.2 依赖 + alpha.2 前瞻）
+
+**rc.2**（作者 profile，`link:` 本插件构建产物，`DSH_WEB_AUTH_FILE` 隔离）：
+
+- `--host 0.0.0.0`：十二探针全绿——回环 303 补签与 200 跳板、远程导航 302 `/login`、匿名 RPC 401、注册双 cookie、登录后 RPC 到 bridge 门后（404）、sid-only 401、陌生 Host 403、登出双清；`--dump-config` 显示 connection 行 `inject: [webServer, webStartup, webAuth]` + `trustedHosts: !!js ctx.webStartup.trustedHosts`（展开为字面列表，`webLanHosts` 消失）。**dsh-ntr canary 干净激活**（本行 inject 的 `webServer` 回归即由此抓出）。
+- `--host <本机 LAN IPv4 字面量>`（新值域）：可启动；`Host:` 该字面量 + 会话 → 401（围栏放行——rc.2 围栏无 `isBindAddressAuthority`，全靠新 `lanHosts` 的 `[自身]` 条目）。
+- `--host ::`：`127.0.0.1` 与 `[::1]` 双通；LAN IPv4、本机全局 IPv6 的 Host + 会话 → 401；陌生 `[2001:db8::99]` → 403。
+- `--tls-cert`/`--public-url` 在 rc.2 → exit 1 人话报错（能力门禁生效，非静默 no-op）。
+
+**alpha.2**（`/tmp/dsh-alpha-e2e` 0.2.1-alpha.2 实机，同上 link 构建产物）：
+
+- 通配 `--host 0.0.0.0`（widen 恢复）与 `--host ::`：启动 + 登录墙（302/401）+ 围栏矩阵（LAN IPv4 401、本机全局 IPv6 401、陌生 IPv6 403）+ 回环补签（`127.0.0.1` 与 `[::1]` 各得 200 跳板）全绿。
+- **TLS 自签全链**（`--tls-cert`/`--tls-key`；openssl 自签、SAN=LAN IP）：https 导航 → 200 跳板 + 补签 cookie 名为 `dsh-auth-` + base64url(sha256(**origin**))（`https://192.168.5.216:3132`）且带 `; Secure`；带真 cookie 二次导航 200 进 SPA；https 登录响应双 cookie 均带 `; Secure`（`dsh_sid` 亦加）；登出双 cookie 清除同样带 `; Secure`；https 下 POST 陌生 Host 403、LAN + 会话缺原生 cookie 401。
+- `--public-url https://app.example.com/`：启动打印改用该 URL（`https://app.example.com/?token=…`）。
+- flag 门禁：`--tls-cert` 单缺、`--tls-key` 单缺 → 成对报错 exit 1；畸形 `--public-url` → 校验报错 exit 1。
+- dsh-ntr canary 双重钉死：`[webServer, webStartup, webAuth]` 干净启动；把 profile 用户 patch 覆写成 stock 形态 `[webStartup, webAuth]` → `dsh: warning: 1 entry did not activate` / `dsh-ntr: cannot get property "webServer" without inject`（connection lib:712）——同时证明 **stock 行同样有此缺口** 与 **patch 层之间是替换而非合并**。
+
 ## 测试要点（`tests/`）
 
-- `tests/ipv6-shim.spec.ts`：`widenHostMember` 在独立 fixture schema 上验拓宽（`::`/`::1`/`fd00::1` ACCEPT 且值保持、`example.com` 仍拒、`port` 字段仍校验、其他成员默认值不变）、同 schema 幂等、异形 schema 返回 false；`ensureIpv6BindSupport` 的首次尝试语义（坏 baseUrl → false；无 baseUrl → 拓宽 import 实例；进程内幂等——`vi.resetModules()` + 动态 import 拿全新模块状态）；`canonicalIpv6`（规范拼写归一、拒 zone/DNS/畸形）；`normalizeBindHost` 值域（方括号归一、**非规范拼写规范化**、拒 DNS 名/畸形/**zone**/**IPv4-mapped**）；`lanHosts`（mock `node:os`：非 IPv6 绑定恒 `[]`、内部接口排除、`%zone` 剥离、**规范拼写 + 方括号 + 无端口且过围栏 `assertTrustedAuthority` 的「解析不改写」断言**、通配的展开拼写（`0:0:0:0:0:0:0:0`）等价于 `::`、接口枚举失败回 `[]`）。
-- `tests/startup.spec.ts`：`--host ::` 与 `--host [::1]` 的 `webStartup.host` 归一、**非规范拼写经启动路径规范化**（`fd00:0:0:0:0:0:0:1` → `fd00::1`）；`webLanHosts` 服务已 provide（patch 表达式的依赖）。
-- **单测摸不到启动路径的那份实例**（双实例分歧，见观察哨 2）：「拓宽后 `::` 能启动」这件事只有 E2E 能证明，单测全绿不等于能用——这正是本功能第一版翻车点。
-- **commander 的 `program.error` 走 `process.exit`**，单测不触达非法 host 路径（与既有 `--port` 报错路径一致，靠 E2E 覆盖）。
+- `tests/ipv6-shim.spec.ts`：`widenHostMember` 在独立 fixture schema 上验拓宽（stock 两时代形状都过：union 与 plain-Error 拒绝通配的 transform；`::`/`::1`/`fd00::1`/具体 IPv4 ACCEPT 且值保持、`example.com` 仍拒、`port` 字段仍校验、其他成员默认值与 `required` 不变）、幂等、异形 schema 返回 false、**plain-Error 成员经 union fallthrough 的兜底 fixture**；`ensureIpv6BindSupport`（坏 baseUrl → false；无 baseUrl → 拓宽 import 实例；`vi.resetModules()` + 动态 import 验首次尝试语义与进程内幂等）；`supportsTlsConfig`（import 实例 rc.2 无 `tls` → false；坏 baseUrl → false；`mkdtemp` fixture profile 根的 webserver 带 `tls` → true）；`canonicalIpv6`（含拒 zone/DNS/畸形）；`normalizeBindHost` 值域（含**具体 IPv4 透传**、方括号归一、非规范拼写规范化、拒 DNS/zone/IPv4-mapped）；`lanHosts` 矩阵（mock `node:os`：`0.0.0.0` → 非 internal IPv4 列表、具体 IPv4 → `[自身]`、`::` → 双家族、规范拼写 + 方括号 + 无端口 + 过围栏装载期断言、接口枚举失败回 `[]`）。
+- `tests/startup.spec.ts`：`--host ::`/`[::1]`/非规范拼写的 `webStartup.host` 归一；**trustedHosts 富化**（`0.0.0.0` → LAN 列表；`::` → `--trusted-host` 序在前 + 双家族；具体 IPv4 → `[自身]`）；`--public-url`/`--tls-cert`/`--tls-key` 透传（fixture 根）与门禁（rc.2 实例上 exit 1）；`--tls-cert` 单缺 → 成对报错；非法 `--public-url` → exit 1。
+- **单测摸不到启动路径的那份实例**（双实例分歧，见观察哨 2）：「拓宽后通配能启动」「TLS 门禁真的按 profile 根的 webserver 判断」只有 E2E 能证明，单测全绿不等于能用——这正是本功能第一版翻车点。
+- **`program.error` 在单测里可观测**：`dsh-cmdline` 的 `parseCmdline` 对整棵命令树 `exitOverride()` 并把 CommanderError 路由到 `ctx.appExit`（`configureExitAndOutput`）——单测以 `exitCodes` 观测 exit 1，非法 host/成对校验/门禁路径都被单测覆盖（旧说明「走 process.exit 单测不触达」已失效）。

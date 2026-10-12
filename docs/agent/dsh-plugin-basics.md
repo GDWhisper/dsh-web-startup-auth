@@ -48,8 +48,10 @@ dsh 的 profile 配置由多层 patch 叠加合成，`cordis.patch.yml` 就是�
 - id: web-startup          # 1. 按 id 禁用原插件
   disabled: true
 
-- id: connection           # 2. 给现有行追加注入依赖
-  inject: [webServer, webRuntime, webAuth]
+- id: connection           # 2. 给现有行追加注入依赖 + 覆盖 config（!!js 可读注入的服务）
+  inject: [webServer, webStartup, webAuth]
+  config:
+    trustedHosts: !!js ctx.webStartup.trustedHosts
 
 - insert:                  # 3. 插入自己的插件
     - id: remote-web-startup
@@ -57,7 +59,7 @@ dsh 的 profile 配置由多层 patch 叠加合成，`cordis.patch.yml` 就是�
 ```
 
 - `{ id, disabled: true }`：禁用某个插件。
-- `{ id, inject: [...] }`：给某个已有行追加注入的能力名。
+- `{ id, inject: [...] }`：给某个已有行追加注入的能力名（行级声明与模块自身 `inject` **合并**；但**后一层 patch 对同一行写 `inject` 会整体替换前一层**——profile 用户 patch 覆盖 bundle 层时尤其注意，实测见 `docs/agent/ipv6-bind.md`）。
 - `{ insert: [{ id, name }] }`：插入插件（`name` 是 npm 包名 + `/子路径`；**前端插件包必须插纯包名「包根行」**，见「前端插件（browser half）」）。
 - patch 里允许 `!!js` 表达式（仅限 config 值和 disabled 字段），其他元数据保持字面量。
 
