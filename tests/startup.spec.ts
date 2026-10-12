@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { isIPv4, isIPv6 } from 'node:net'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type { Context } from '@deepseek-ai/cordis'
 import {
   apply,
@@ -19,8 +19,23 @@ import {
   getUsername,
 } from '../src/credential-store.ts'
 
+// Deterministic interface enumeration for the trustedHosts derivation (the
+// LAN authorities appended to --trusted-host values); tmpdir stays real.
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('node:os')>()),
+  networkInterfaces: vi.fn(() => ({
+    eth0: [
+      { address: 'fd00::1', family: 'IPv6', internal: false },
+      { address: 'fe80::1234%eth0', family: 'IPv6', internal: false },
+      { address: '10.0.0.5', family: 'IPv4', internal: false },
+    ],
+    lo: [{ address: '::1', family: 'IPv6', internal: true }],
+  })),
+}))
+
 let authFile: string
 let authDir: string
+const bootRoots: string[] = []
 
 beforeEach(() => {
   authDir = mkdtempSync(join(tmpdir(), 'dsh-web-startup-'))
@@ -31,9 +46,24 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.DSH_WEB_AUTH_FILE
   rmSync(authDir, { recursive: true, force: true })
+  for (const root of bootRoots.splice(0)) rmSync(root, { recursive: true, force: true })
 })
 
-function makeFakeContext() {
+/**
+ * A profile-root-shaped fixture whose boot-path webserver declares the
+ * 0.2.1-line `tls` member, so the capability probe reports true.
+ */
+function tlsCapableBootRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-web-startup-boot-'))
+  bootRoots.push(root)
+  const pkg = join(root, 'node_modules', '@deepseek-ai', 'dsh-host-webserver')
+  mkdirSync(pkg, { recursive: true })
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-host-webserver', version: '0.0.0', main: 'index.js' }))
+  writeFileSync(join(pkg, 'index.js'), 'module.exports = { WebServer: { Config: { dict: { host: {}, tls: {} } } } }\n')
+  return pathToFileURL(`${root}/`).href
+}
+
+function makeFakeContext(baseUrl?: string) {
   const provided = new Map<string, unknown>()
   const exitCodes: number[] = []
   const ctx = {
@@ -41,6 +71,7 @@ function makeFakeContext() {
     get: (key: string) => provided.get(key),
     provided,
     exitCodes,
+    ...baseUrl !== undefined && { baseUrl },
   } as unknown as Context & { provided: Map<string, unknown>; exitCodes: number[] }
   return ctx
 }
@@ -52,10 +83,17 @@ function runStartup(ctx: ReturnType<typeof makeFakeContext>, args: string[]) {
     if (key === 'appExit') return (code: number) => { ctx.exitCodes.push(code) }
     return originalGet(key)
   }
+  // program.error prints through the cmdline output before routing the
+  // CommanderError to appExit; keep the expected usage-error chatter out of
+  // the test log.
+  const stderr = process.stderr.write.bind(process.stderr)
+  process.stderr.write = () => true
   try {
     apply(ctx)
   } catch (error) {
     return { error }
+  } finally {
+    process.stderr.write = stderr
   }
   return {}
 }
@@ -93,12 +131,14 @@ function sessionCookie(username: string, ttlSec = 3600): string {
 }
 
 describe('remote web-startup', () => {
-  it('accepts --host 0.0.0.0 and provides webStartup', () => {
+  it('accepts --host 0.0.0.0 and provides webStartup with the LAN trust list', () => {
     const ctx = makeFakeContext()
     const result = runStartup(ctx, ['--host', '0.0.0.0', '--port', '8080'])
     expect(result.error).toBeUndefined()
     const values = ctx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined
-    expect(values).toEqual({ host: '0.0.0.0', port: 8080, trustedHosts: [], openBrowser: true })
+    // The 0.0.0.0 bind serves every IPv4 interface address, so those are
+    // trusted — mirroring the stock resolveLanTrust of the 0.2.0 line.
+    expect(values).toEqual({ host: '0.0.0.0', port: 8080, trustedHosts: ['10.0.0.5'], openBrowser: true })
   })
 
   it('keeps trusted-host parsing', () => {
@@ -117,7 +157,7 @@ describe('remote web-startup', () => {
     const result = runStartup(ctx, ['--host', '0.0.0.0', '--no-open'])
     expect(result.error).toBeUndefined()
     const values = ctx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined
-    expect(values).toEqual({ host: '0.0.0.0', trustedHosts: [], openBrowser: false })
+    expect(values).toEqual({ host: '0.0.0.0', trustedHosts: ['10.0.0.5'], openBrowser: false })
   })
 
   it('does not provide webStartup when the auth-reset subcommand is invoked', async () => {
@@ -141,16 +181,68 @@ describe('remote web-startup', () => {
     expect((expanded.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined)?.host).toBe('fd00::1')
   })
 
-  it('provides the LAN-host helper the cordis patch consumes', () => {
+  it('enriches trustedHosts with the bind-derived LAN authorities', () => {
     const ctx = makeFakeContext()
-    runStartup(ctx, ['--host', '::'])
-    const helper = ctx.get('webLanHosts') as ((host: string | undefined) => string[]) | undefined
-    expect(typeof helper).toBe('function')
-    expect(helper?.('0.0.0.0')).toEqual([])
-    for (const host of helper?.('::') ?? []) {
-      const literal = host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host
-      expect(isIPv6(literal) || isIPv4(literal), host).toBe(true)
-    }
+    runStartup(ctx, ['--host', '::', '--trusted-host', 'lab.internal'])
+    const values = ctx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined
+    // Explicit --trusted-host values in argument order, then the dual-stack
+    // surface of `::`: both interface families, IPv6 bracketed canonically
+    // (the form the fence's load-time authority assert demands).
+    expect(values?.trustedHosts).toEqual(['lab.internal', '[fd00::1]', '[fe80::1234]', '10.0.0.5'])
+  })
+
+  it('trusts exactly the bound address for a concrete IPv4 host', () => {
+    const ctx = makeFakeContext()
+    expect(runStartup(ctx, ['--host', '192.168.1.5']).error).toBeUndefined()
+    const values = ctx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined
+    // The 0.2.0-line fence has no bind-address auto-trust, so the entry is
+    // load-bearing there; on the 0.2.1 fence it is a harmless duplicate.
+    expect(values).toEqual({ host: '192.168.1.5', trustedHosts: ['192.168.1.5'], openBrowser: true })
+  })
+
+  it('passes --public-url and --tls-cert/--tls-key through on a TLS-capable harness', () => {
+    const urlCtx = makeFakeContext(tlsCapableBootRoot())
+    expect(runStartup(urlCtx, ['--host', '127.0.0.1', '--public-url', 'https://app.example/ui/']).error).toBeUndefined()
+    expect(urlCtx.exitCodes).toEqual([])
+    expect((urlCtx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined)?.publicUrl).toBe('https://app.example/ui/')
+
+    const tlsCtx = makeFakeContext(tlsCapableBootRoot())
+    expect(runStartup(tlsCtx, ['--host', '127.0.0.1', '--tls-cert', '/tmp/chain.pem', '--tls-key', '/tmp/key.pem']).error).toBeUndefined()
+    expect(tlsCtx.exitCodes).toEqual([])
+    expect((tlsCtx.get(WEB_STARTUP_SERVICE) as WebStartupValues | undefined)?.tls).toEqual({
+      certFile: '/tmp/chain.pem',
+      keyFile: '/tmp/key.pem',
+    })
+  })
+
+  it('rejects a lone --tls-cert/--tls-key with the pairing error', () => {
+    const ctx = makeFakeContext(tlsCapableBootRoot())
+    const result = runStartup(ctx, ['--host', '127.0.0.1', '--tls-cert', '/tmp/chain.pem'])
+    expect(result.error).toBeUndefined()
+    expect(ctx.exitCodes).toEqual([1])
+    expect(ctx.get(WEB_STARTUP_SERVICE)).toBeUndefined()
+  })
+
+  it('rejects TLS / --public-url on a harness without those capabilities', () => {
+    // The imported rc.2 webserver Config has no `tls` member: the probe must
+    // fail the flags loudly instead of letting the rows ignore them.
+    const tlsCtx = makeFakeContext()
+    runStartup(tlsCtx, ['--host', '127.0.0.1', '--tls-cert', '/tmp/chain.pem', '--tls-key', '/tmp/key.pem'])
+    expect(tlsCtx.exitCodes).toEqual([1])
+    expect(tlsCtx.get(WEB_STARTUP_SERVICE)).toBeUndefined()
+
+    const urlCtx = makeFakeContext()
+    runStartup(urlCtx, ['--host', '127.0.0.1', '--public-url', 'https://app.example/'])
+    expect(urlCtx.exitCodes).toEqual([1])
+    expect(urlCtx.get(WEB_STARTUP_SERVICE)).toBeUndefined()
+  })
+
+  it('rejects a malformed --public-url before the capability gate', () => {
+    // TLS-capable harness, so exit 1 can only come from the URL validator.
+    const ctx = makeFakeContext(tlsCapableBootRoot())
+    runStartup(ctx, ['--host', '127.0.0.1', '--public-url', 'app.example'])
+    expect(ctx.exitCodes).toEqual([1])
+    expect(ctx.get(WEB_STARTUP_SERVICE)).toBeUndefined()
   })
 })
 

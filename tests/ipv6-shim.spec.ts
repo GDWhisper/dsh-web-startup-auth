@@ -1,14 +1,17 @@
 import { describe, expect, it, vi, beforeAll } from 'vitest'
-import { isIPv6 } from 'node:net'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { isIPv4, isIPv6 } from 'node:net'
 import { networkInterfaces } from 'node:os'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { WebServer } from '@deepseek-ai/dsh-host-webserver'
 import {
   canonicalIpv6,
   ensureIpv6BindSupport,
-  isIpv6Host,
   lanHosts,
   normalizeBindHost,
+  supportsTlsConfig,
   widenHostMember,
 } from '../src/ipv6-shim.ts'
 
@@ -42,10 +45,10 @@ beforeAll(() => {
 })
 
 describe('widenHostMember', () => {
-  it('accepts IPv6 literals while keeping the stock members and other fields', () => {
+  it('accepts IPv4/IPv6 literals while keeping the stock members and other fields', () => {
     const schema = stockLikeSchema()
     expect(widenHostMember(schema)).toBe(true)
-    for (const host of ['127.0.0.1', '0.0.0.0', '::', '::1', 'fd00::1']) {
+    for (const host of ['127.0.0.1', '0.0.0.0', '192.168.1.5', '::', '::1', 'fd00::1']) {
       const result = validate(schema, { host, port: 3000 })
       expect(result.issues, `${host} should validate`).toBeUndefined()
       expect(result.value.host).toBe(host)
@@ -54,6 +57,32 @@ describe('widenHostMember', () => {
     expect(validate(schema, { host: '::', port: 'abc' }).issues).toBeDefined()
     // the untouched member keeps its default
     expect(validate(schema, { host: '::', port: 3000 }).value.compression).toBe('none')
+  })
+
+  it('rescues a member that rejects wildcards with a plain Error (the 0.2.1 shape)', () => {
+    // mirrors the 0.2.1 stock member: concrete literals pass, everything
+    // else — wildcards included — throws a plain Error, NOT ValidationError.
+    // schemastery's union catches every member error, so the wildcards must
+    // fall through to our member.
+    const schema = z.object({
+      host: z.transform(z.string(), (value) => {
+        if (!isIPv4(value) && !isIPv6(value)) {
+          throw new Error(`webserver: host ${JSON.stringify(value)} is not a concrete IPv4 or IPv6 address literal`)
+        }
+        if (value === '0.0.0.0' || value === '::') {
+          throw new Error(`webserver: host ${JSON.stringify(value)} is an unspecified (wildcard) address, which is not supported`)
+        }
+        return value
+      }).required(),
+      port: z.natural().max(65535).required(),
+    })
+    expect(widenHostMember(schema)).toBe(true)
+    for (const host of ['0.0.0.0', '::', 'fd00::1', '192.168.1.5']) {
+      const result = validate(schema, { host, port: 3000 })
+      expect(result.issues, `${host} should validate`).toBeUndefined()
+      expect(result.value.host).toBe(host)
+    }
+    expect(validate(schema, { host: 'example.com', port: 3000 }).issues).toBeDefined()
   })
 
   it('keeps the host member required after widening', () => {
@@ -105,6 +134,26 @@ describe('ensureIpv6BindSupport', () => {
   })
 })
 
+describe('supportsTlsConfig', () => {
+  it('reports false for the installed 0.2.0-line webserver and for unresolvable roots', () => {
+    expect(supportsTlsConfig()).toBe(false)
+    expect(supportsTlsConfig('file:///nonexistent-profile-root/')).toBe(false)
+  })
+
+  it('reports true when the boot-path webserver declares a tls member', () => {
+    const root = mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'dsh-boot-webserver-'))
+    try {
+      const pkg = join(root, 'node_modules', '@deepseek-ai', 'dsh-host-webserver')
+      mkdirSync(pkg, { recursive: true })
+      writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-host-webserver', version: '0.0.0', main: 'index.js' }))
+      writeFileSync(join(pkg, 'index.js'), 'module.exports = { WebServer: { Config: { dict: { host: {}, tls: {} } } } }\n')
+      expect(supportsTlsConfig(pathToFileURL(`${root}/`).href)).toBe(true)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('canonicalIpv6', () => {
   it('returns the WHATWG-canonical bare literal', () => {
     expect(canonicalIpv6('fd00:0:0:0:0:0:0:1')).toBe('fd00::1')
@@ -125,6 +174,11 @@ describe('normalizeBindHost', () => {
   it('passes the stock literals through', () => {
     expect(normalizeBindHost('127.0.0.1')).toBe('127.0.0.1')
     expect(normalizeBindHost('0.0.0.0')).toBe('0.0.0.0')
+  })
+
+  it('accepts concrete IPv4 literals', () => {
+    expect(normalizeBindHost('192.168.1.5')).toBe('192.168.1.5')
+    expect(normalizeBindHost('10.0.0.1')).toBe('10.0.0.1')
   })
 
   it('accepts IPv6 literals, strips the URL bracket form, and canonicalizes', () => {
@@ -152,15 +206,6 @@ describe('normalizeBindHost', () => {
   })
 })
 
-describe('isIpv6Host', () => {
-  it('treats bracketed literals as IPv6', () => {
-    expect(isIpv6Host('::')).toBe(true)
-    expect(isIpv6Host('[fd00::1]')).toBe(true)
-    expect(isIpv6Host('0.0.0.0')).toBe(false)
-    expect(isIpv6Host('example.com')).toBe(false)
-  })
-})
-
 /** The fence's load-time entry rule: survive WHATWG parsing unchanged (case aside). */
 function expectFenceCanonical(entries: string[]) {
   for (const entry of entries) {
@@ -169,12 +214,22 @@ function expectFenceCanonical(entries: string[]) {
 }
 
 describe('lanHosts', () => {
-  it('returns nothing for non-IPv6 binds, whatever the interfaces', () => {
+  it('returns nothing for loopback, undefined, and non-literals, whatever the interfaces', () => {
     expect(lanHosts(undefined)).toEqual([])
     expect(lanHosts('127.0.0.1')).toEqual([])
-    expect(lanHosts('0.0.0.0')).toEqual([])
     expect(lanHosts('example.com')).toEqual([])
     expect(lanHosts('::g')).toEqual([])
+  })
+
+  it('derives the IPv4 interface list for the IPv4 wildcard bind', () => {
+    // mirrors the deleted 0.2.0-line resolveLanTrust: IPv4 non-internal only
+    expect(lanHosts('0.0.0.0')).toEqual(['10.0.0.5'])
+    expectFenceCanonical(lanHosts('0.0.0.0'))
+  })
+
+  it('trusts exactly the bound address for a concrete IPv4 bind', () => {
+    expect(lanHosts('192.168.1.5')).toEqual(['192.168.1.5'])
+    expectFenceCanonical([...lanHosts('192.168.1.5'), ...lanHosts('10.0.0.5')])
   })
 
   it('trusts both interface families on the dual-stack wildcard bind', () => {
@@ -205,5 +260,9 @@ describe('lanHosts', () => {
       throw new Error('enumeration boom')
     })
     expect(lanHosts('::')).toEqual([])
+    vi.mocked(networkInterfaces).mockImplementationOnce(() => {
+      throw new Error('enumeration boom')
+    })
+    expect(lanHosts('0.0.0.0')).toEqual([])
   })
 })

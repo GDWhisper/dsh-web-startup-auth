@@ -4,8 +4,9 @@
 #   1. disable the stock web-startup (which hard-rejects --host 0.0.0.0)
 #   2. insert a remote-capable startup that provides the same webStartup service
 #   3. insert an auth plugin with front-end login/register
-#   4. patch the `connection` row to inject `webAuth` so it waits for the auth
-#      plugin to wrap the webserver's route registration.
+#   4. point the `connection` row's trustedHosts at the remote startup's
+#      complete authority list, and inject `webAuth` so the row waits for the
+#      auth plugin to wrap the webserver's route registration.
 #
 # Usage:
 #   dsh --profile web --patch ./cordis.patch.yml --host 0.0.0.0
@@ -14,17 +15,29 @@
   disabled: true
 
 - id: connection
-  # webLanHosts is required by the trustedHosts expression below: cordis
-  # gates ctx.<service> access on inject declarations (ungated access throws).
-  inject: [webServer, webRuntime, webAuth, webLanHosts]
+  # webServer must stay in this list: HostConnectionService.register runs
+  # `owner.webServer.register(route)` against the connection row's inject
+  # scope, so third-party consumers of `ctx.connection.rpc.handle` /
+  # `connection.fetch.register` (e.g. dsh-ntr) fail with `cannot get property
+  # "webServer" without inject` when it is dropped (E2E 2026-10-12, the 0.2.1
+  # preview stock row [webStartup] has the same gap). webStartup carries the
+  # fence authority list the expression below reads: cordis gates
+  # ctx.<service> access on inject declarations (ungated access throws at
+  # interpolation). webAuth is the ordering red line — this row must not
+  # activate before the auth plugin wrapped the webserver's route
+  # registration, or the /api routes mount unprotected
+  # (docs/agent/auth-mechanics.md「路由保护顺序」). Row inject merges into the
+  # connection module's own `inject`; it never replaces it.
+  inject: [webServer, webStartup, webAuth]
   config:
-    # web-app's own expression derives LAN IPv4 literals from the active bind
-    # plus --trusted-host extras; we keep it and append what it can never
-    # produce: the IPv6 authorities, and — on the dual-stack `::` bind, whose
-    # socket answers IPv4-mapped clients too — the IPv4 literals resolveLanTrust
-    # only derives for `0.0.0.0` (issue #35). Entries are bracketed/plain
-    # authorities matching the fence's WHATWG-form hostname normalization.
-    trustedHosts: !!js "[...ctx.webRuntime.trustedHosts, ...ctx.webLanHosts?.(ctx.webServer.host) ?? []]"
+    # One expression, both harness eras: on the 0.2.1 line this is verbatim the
+    # stock row (upstream deleted resolveLanTrust and reads invocation
+    # authorities from webStartup), on the 0.2.0 line it replaces the stock
+    # `ctx.webRuntime.trustedHosts` consumption. Either way the list is the
+    # remote startup's: --trusted-host values plus the bind-derived LAN/IPv6
+    # authorities the stock derivations cannot produce for wildcard binds
+    # (issue #35; docs/agent/ipv6-bind.md).
+    trustedHosts: !!js ctx.webStartup.trustedHosts
 
 - insert:
     - id: dsh-web-startup-auth

@@ -50,12 +50,15 @@ afterEach(() => {
 })
 
 /** Fake context that records every registered route for handler-level tests. */
-function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = [], credentials?: unknown, preFallback?: WebRoute['handler']) {
+function fakeWebAuthContext(bindHost: string, preRegistered: WebRoute[] = [], credentials?: unknown, preFallback?: WebRoute['handler'], protocol?: string) {
   const provided = new Map<string, unknown>()
   const routes: WebRoute[] = []
   const webServer = {
     host: bindHost,
     port: 3080,
+    // The 0.2.1-line listener protocol; absent on the 0.2.0 line, where the
+    // auth plugin must read it as "not secure" (plain HTTP).
+    ...protocol !== undefined && { protocol },
     exact: new Map<string, WebRoute>(),
     prefixes: new Map<string, WebRoute>(),
     upgrades: new Map<string, { path: string; handler: (req: unknown, socket: unknown, head: unknown) => unknown }>(),
@@ -624,6 +627,8 @@ describe('native browser-auth cookie bridge', () => {
     const payload = expectValidNativeCookie(captured.setCookie ?? '')
     // The cookie is bound to the caller's own authority, never a loopback one.
     expect(payload.authority).toBe('192.168.5.216:3080')
+    // Plain-HTTP cookies stay byte-identical to the historical form.
+    expect(captured.setCookie).not.toContain('; Secure')
   })
 
   it('mints the native cookie with a 200 bounce for a real browser navigation', async () => {
@@ -900,6 +905,124 @@ describe('native browser-auth cookie bridge', () => {
       expect(captured.body).toContain('<meta http-equiv="refresh" content="0;url=/app">')
       expectValidNativeCookie(captured.setCookie ?? '')
     }
+  })
+})
+
+describe('TLS listener (webServer.protocol https)', () => {
+  /** A downstream handler echoing success (mimics an authenticated page route). */
+  const okPage: WebRoute = {
+    kind: 'exact',
+    path: '/app',
+    handler: async (_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<html></html>')
+    },
+  }
+
+  /** The native cookie name upstream derives on an https listener: sha256(origin). */
+  function secureCookieName(origin: string): string {
+    return `dsh-auth-${createHash('sha256').update(origin).digest('base64url')}`
+  }
+
+  it('binds the minted cookie to the https origin and flags it Secure', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials(), undefined, 'https:')
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: 'dsh.example.com:8443',
+        ip: '192.0.2.90',
+        accept: 'text/html',
+        cookie: sessionCookie('admin'),
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(captured.setCookie).toContain('; Secure')
+    const payload = expectValidNativeCookie(captured.setCookie ?? '')
+    // Upstream requestAudience switches to the full origin on TLS — the
+    // scheme makes the authority-only spelling ambiguous about the port.
+    expect(payload.authority).toBe('https://dsh.example.com:8443')
+    expect(captured.setCookie?.startsWith(`${secureCookieName('https://dsh.example.com:8443')}=`)).toBe(true)
+  })
+
+  it('strips the default https port from the origin audience', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials(), undefined, 'https:')
+    const route = findRoute(routes, '/app')
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: 'dsh.example.com:443',
+        ip: '192.0.2.90',
+        accept: 'text/html',
+        cookie: sessionCookie('admin'),
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    const payload = expectValidNativeCookie(captured.setCookie ?? '')
+    expect(payload.authority).toBe('https://dsh.example.com')
+  })
+
+  it('forwards a caller holding the origin-bound native cookie without re-minting', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [okPage], fakeCredentials(), undefined, 'https:')
+    const route = findRoute(routes, '/app')
+    const native = `${secureCookieName('https://dsh.example.com:8443')}=v1.placeholder.sig`
+    const { captured, res } = jsonResponseCapture()
+    await route.handler(
+      httpRequest({
+        url: '/app',
+        host: 'dsh.example.com:8443',
+        ip: '192.0.2.90',
+        accept: 'text/html',
+        cookie: `${sessionCookie('admin')}; ${native}`,
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    expect(captured.setCookie).toBeUndefined()
+  })
+
+  it('issues Secure dsh_sid and native cookies from an https login', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [], fakeCredentials(), undefined, 'https:')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/login').handler(
+      jsonRequest('POST', { username: 'admin', password: 'secret1' }, {
+        ip: '192.0.2.86',
+        host: 'dsh.example.com:8443',
+      }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    const sid = captured.setCookies?.find((cookie) => cookie.startsWith('dsh_sid='))
+    expect(sid).toContain('; Secure')
+    const native = captured.setCookies?.find((cookie) => cookie.startsWith('dsh-auth-'))
+    expect(native).toContain('; Secure')
+    expect(expectValidNativeCookie(native ?? '').authority).toBe('https://dsh.example.com:8443')
+  })
+
+  it('clears both cookies with Secure on an https logout', async () => {
+    registerCredentials('admin', 'secret1')
+    const { routes } = fakeWebAuthContext('0.0.0.0', [], fakeCredentials(), undefined, 'https:')
+    const { captured, res } = jsonResponseCapture()
+    await findRoute(routes, '/api/auth/logout').handler(
+      httpRequest({ host: 'dsh.example.com:8443', ip: '192.0.2.85', method: 'POST' }),
+      res,
+    )
+    expect(captured.statusCode).toBe(200)
+    const sid = captured.setCookies?.find((cookie) => cookie.startsWith('dsh_sid='))
+    expect(sid).toContain('Max-Age=0')
+    expect(sid).toContain('; Secure')
+    const nativeClear = captured.setCookies?.find((cookie) => cookie.startsWith('dsh-auth-'))
+    expect(nativeClear).toContain('Max-Age=0')
+    expect(nativeClear).toContain('; Secure')
+    expect(nativeClear?.startsWith(`${secureCookieName('https://dsh.example.com:8443')}=`)).toBe(true)
   })
 })
 

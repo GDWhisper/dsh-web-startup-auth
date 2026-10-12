@@ -337,12 +337,16 @@ function pruneLoginFailures(now = Date.now()): void {
 }
 
 /** Cookie header string for a session cookie with the configured expiry. */
-function sessionCookieSet(value: string): string {
-  return `${SESSION_COOKIE}=${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${getSessionMaxAgeSec()}`
+function sessionCookieSet(value: string, secure: boolean): string {
+  const attributes = `${SESSION_COOKIE}=${value}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${getSessionMaxAgeSec()}`
+  return secure ? `${attributes}; Secure` : attributes
 }
 
-/** Clear the session cookie. */
-const SESSION_CLEAR = `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`
+/** Clear the session cookie (carrying `Secure` on a TLS listener, like the set). */
+function sessionCookieClear(secure: boolean): string {
+  const attributes = `${SESSION_COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0`
+  return secure ? `${attributes}; Secure` : attributes
+}
 
 /** Parse the session cookie from a request. */
 function parseSessionCookie(req: IncomingMessage): string | undefined {
@@ -546,7 +550,7 @@ function isTrustedOrigin(req: IncomingMessage): boolean {
 
 // ── native browser-auth bridge (dsh 0.1.2) ──────────────────────────────────
 //
-// dsh 0.1.2's `browser-auth.ts` signs its own `dsh-auth-<sha256(authority)>`
+// dsh 0.1.2's `browser-auth.ts` signs its own `dsh-auth-<sha256(audience)>`
 // cookie with a 32-byte secret persisted in the credentials service under
 // `credentialKey('client-connection', 'browser-session')`. Every `/api`
 // request and the SPA index must carry that cookie (no loopback exemption),
@@ -554,7 +558,9 @@ function isTrustedOrigin(req: IncomingMessage): boolean {
 // fence without help. The bridge mints the exact same cookie format for such
 // callers. This is a deliberate coupling to the upstream cookie format;
 // `docs/upgrade-dsh-0.1.2-playbook.md` says to re-diff `browser-auth.ts`
-// after every dsh upgrade.
+// after every dsh upgrade. The 0.2.1 line made the audience protocol-scoped
+// (HTTPS → origin, not host) and the cookie `Secure`-flagged on TLS
+// listeners; on HTTP both come out byte-identical to the historical form.
 //
 // The secret is read lazily (the connection plugin creates it during its own
 // apply, which may race ours) and cached after the first successful read.
@@ -583,32 +589,35 @@ let lookupCredentials: (() => BrowserSessionCredentials | undefined) | undefined
 const browserSecretCache = new WeakMap<object, Buffer>()
 
 /**
- * Canonical request authority, exactly as upstream computes it
- * (`browser-auth.ts` `requestAuthority`): the `URL`-normalized host, which
- * lowercases and strips default ports. The cookie name is derived from this
- * value, so any mismatch would produce a cookie upstream never looks for.
+ * Protocol-scoped cookie audience, exactly as upstream computes it
+ * (`browser-auth.ts` `requestAudience`): the `URL`-normalized host on HTTP
+ * (lowercased, default port stripped), the full origin on HTTPS — where the
+ * scheme makes an authority-only spelling ambiguous about the default port.
+ * The cookie name is derived from this value, so any mismatch would produce
+ * a cookie upstream never looks for.
  */
-function requestAuthority(headers: IncomingMessage['headers']): string | undefined {
+function requestAudience(headers: IncomingMessage['headers'], secure: boolean): string | undefined {
   const host = headers.host
   if (host === undefined) return undefined
   try {
-    return new URL(`http://${host}`).host
+    const url = new URL(`${secure ? 'https:' : 'http:'}//${host}`)
+    return secure ? url.origin : url.host
   } catch {
     return undefined
   }
 }
 
-/** Native cookie name for an authority (`dsh-auth-` + base64url(sha256)). */
-function browserCookieName(authority: string): string {
-  const digest = createHash('sha256').update(authority).digest()
+/** Native cookie name for an audience (`dsh-auth-` + base64url(sha256)). */
+function browserCookieName(audience: string): string {
+  const digest = createHash('sha256').update(audience).digest()
   return BROWSER_COOKIE_PREFIX + digest.toString('base64url')
 }
 
 /** Read the exact generated native cookie without general Cookie decoding. */
-function readBrowserCookie(headers: IncomingMessage['headers'], authority: string): string | undefined {
+function readBrowserCookie(headers: IncomingMessage['headers'], audience: string): string | undefined {
   const raw = headers.cookie
   if (raw === undefined) return undefined
-  const name = browserCookieName(authority)
+  const name = browserCookieName(audience)
   for (const segment of raw.split(';')) {
     const at = segment.indexOf('=')
     if (at === -1 || segment.slice(0, at).trim() !== name) continue
@@ -663,35 +672,40 @@ function encodeBrowserCookie(
   return `v1.${body}.${signature}`
 }
 
-/** Cookie attributes copied from upstream `sessionCookie`. */
-function browserCookieAttributes(expiresAt: number): string {
-  return `; Max-Age=${String(BROWSER_COOKIE_MAX_AGE_SEC)}; Path=/; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; SameSite=Strict`
+/** Cookie attributes copied from upstream `sessionCookie`, `; Secure` appended on TLS. */
+function browserCookieAttributes(expiresAt: number, secure: boolean): string {
+  const attributes = `; Max-Age=${String(BROWSER_COOKIE_MAX_AGE_SEC)}; Path=/; Expires=${new Date(expiresAt).toUTCString()}; HttpOnly; SameSite=Strict`
+  return secure ? `${attributes}; Secure` : attributes
 }
 
 /**
  * Mint a `Set-Cookie` value for the native browser-auth cookie, bound to the
- * request's own authority. Returns undefined when the authority is missing
+ * request's own audience. Returns undefined when the audience is missing
  * or the signing secret is not available yet (retry on the next request).
+ * @param req - the request whose Host (audience) and TLS listener scope the cookie.
+ * @param secure - whether the receiving listener serves TLS.
  */
-async function mintBrowserCookie(req: IncomingMessage): Promise<string | undefined> {
+async function mintBrowserCookie(req: IncomingMessage, secure: boolean): Promise<string | undefined> {
   const secret = await browserAuthSecret()
   if (secret === undefined) return undefined
-  const authority = requestAuthority(req.headers)
-  if (authority === undefined) return undefined
+  const audience = requestAudience(req.headers, secure)
+  if (audience === undefined) return undefined
   const issuedAt = Date.now()
   const expiresAt = issuedAt + BROWSER_COOKIE_MAX_AGE_SEC * 1000
-  const value = encodeBrowserCookie({ version: BROWSER_COOKIE_VERSION, authority, issuedAt, expiresAt }, secret)
-  return `${browserCookieName(authority)}=${value}${browserCookieAttributes(expiresAt)}`
+  const value = encodeBrowserCookie({ version: BROWSER_COOKIE_VERSION, authority: audience, issuedAt, expiresAt }, secret)
+  return `${browserCookieName(audience)}=${value}${browserCookieAttributes(expiresAt, secure)}`
 }
 
 /**
- * Clear the native cookie for the request's authority. The name is derivable
- * without the secret, so logout can always emit this.
+ * Clear the native cookie for the request's audience. The name is derivable
+ * without the secret, so logout can always emit this. `Secure` mirrors the
+ * set on a TLS listener, which is the canonical deletion of a Secure cookie.
  */
-function clearBrowserCookie(req: IncomingMessage): string | undefined {
-  const authority = requestAuthority(req.headers)
-  if (authority === undefined) return undefined
-  return `${browserCookieName(authority)}=; Max-Age=0; Path=/; HttpOnly; SameSite=Strict`
+function clearBrowserCookie(req: IncomingMessage, secure: boolean): string | undefined {
+  const audience = requestAudience(req.headers, secure)
+  if (audience === undefined) return undefined
+  const attributes = '; Max-Age=0; Path=/; HttpOnly; SameSite=Strict'
+  return `${browserCookieName(audience)}=${secure ? `${attributes}; Secure` : attributes}`
 }
 
 /**
@@ -747,6 +761,12 @@ function isPageNavigation(req: IncomingMessage): boolean {
 export function apply(ctx: Context, _config: Config): void {
   const webServer: WebServer = ctx.webServer
   const bindHost = webServer.host
+  // Whether the listener terminates TLS — the sole source for the cookie
+  // audience spelling and the `Secure` attribute, mirroring upstream
+  // (`ctx.get('webServer')?.protocol === 'https:'` in rpc-host). Read
+  // structurally: the 0.2.0-line WebServer type has no `protocol`, where
+  // this yields false and every cookie stays byte-identical to its HTTP form.
+  const secure = (webServer as { protocol?: unknown }).protocol === 'https:'
 
   // The credentials service is owned by the credentials plugin; look it up
   // lazily (it may activate after web-auth) instead of declaring an inject,
@@ -832,8 +852,8 @@ export function apply(ctx: Context, _config: Config): void {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          const cookies = [sessionCookieSet(cookie)]
-          const native = await mintBrowserCookie(req)
+          const cookies = [sessionCookieSet(cookie, secure)]
+          const native = await mintBrowserCookie(req, secure)
           if (native !== undefined) cookies.push(native)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': cookies })
           res.end(JSON.stringify({ ok: true }))
@@ -916,8 +936,8 @@ export function apply(ctx: Context, _config: Config): void {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          const cookies = [sessionCookieSet(cookie)]
-          const native = await mintBrowserCookie(req)
+          const cookies = [sessionCookieSet(cookie, secure)]
+          const native = await mintBrowserCookie(req, secure)
           if (native !== undefined) cookies.push(native)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': cookies })
           res.end(JSON.stringify({ ok: true }))
@@ -940,8 +960,8 @@ export function apply(ctx: Context, _config: Config): void {
         // native cookie alone cannot restore access — our wrapper rejects
         // any request without a valid `dsh_sid` — but clearing it keeps the
         // browser consistent with the signed-out state.
-        const cookies = [SESSION_CLEAR]
-        const nativeClear = clearBrowserCookie(req)
+        const cookies = [sessionCookieClear(secure)]
+        const nativeClear = clearBrowserCookie(req, secure)
         if (nativeClear !== undefined) cookies.push(nativeClear)
         res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': cookies })
         res.end(JSON.stringify({ ok: true }))
@@ -1004,8 +1024,8 @@ export function apply(ctx: Context, _config: Config): void {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          const cookies = [sessionCookieSet(cookie)]
-          const native = await mintBrowserCookie(req)
+          const cookies = [sessionCookieSet(cookie, secure)]
+          const native = await mintBrowserCookie(req, secure)
           if (native !== undefined) cookies.push(native)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': cookies })
           res.end(JSON.stringify({ ok: true }))
@@ -1078,8 +1098,8 @@ export function apply(ctx: Context, _config: Config): void {
             jsonResponse(res, 500, { error: '服务器内部错误' })
             return
           }
-          const cookies = [sessionCookieSet(cookie)]
-          const native = await mintBrowserCookie(req)
+          const cookies = [sessionCookieSet(cookie, secure)]
+          const native = await mintBrowserCookie(req, secure)
           if (native !== undefined) cookies.push(native)
           res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': cookies })
           res.end(JSON.stringify({ ok: true, username: newUsername }))
@@ -1412,10 +1432,10 @@ export function apply(ctx: Context, _config: Config): void {
         jsonResponse(res, 401, { error: 'unauthorized' })
         return
       }
-      const authority = requestAuthority(req.headers)
-      if (authority !== undefined && readBrowserCookie(req.headers, authority) === undefined &&
+      const audience = requestAudience(req.headers, secure)
+      if (audience !== undefined && readBrowserCookie(req.headers, audience) === undefined &&
           (req.method === 'GET' || req.method === 'HEAD')) {
-        const minted = await mintBrowserCookie(req)
+        const minted = await mintBrowserCookie(req, secure)
         if (minted !== undefined) {
           // Only ever bounce to a path on this origin. An absolute-form
           // request target (`GET http://host/...`, `GET //host/...`) must
@@ -1574,7 +1594,7 @@ export function apply(ctx: Context, _config: Config): void {
   }
 
   ctx.provide('webAuth', service)
-  ctx.logger.info('web-auth: active (bind host %s, credentials: %s)',
-    bindHost, hasCredentials() ? 'set' : 'not set')
+  ctx.logger.info('web-auth: active (bind host %s, tls %s, credentials: %s)',
+    bindHost, secure ? 'on' : 'off', hasCredentials() ? 'set' : 'not set')
   void ctx.get(WEB_STARTUP_SERVICE) // ensure injection is satisfied
 }

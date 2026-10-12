@@ -24,12 +24,13 @@ interface Harness {
   bridged: () => boolean
 }
 
-function harness(): Harness {
+function harness(protocol?: string): Harness {
   const ctx = new Context()
   const routes: WebRoute[] = []
   const webServer = {
     host: '0.0.0.0',
     port: 3080,
+    ...protocol !== undefined && { protocol },
     exact: new Map<string, WebRoute>(),
     prefixes: new Map<string, WebRoute>(),
     upgrades: new Map<string, unknown>(),
@@ -122,5 +123,19 @@ describe('connection/request waterfall on the real events bus', () => {
     await h.dispatch(request({ ip: '127.0.0.1', host: '127.0.0.1:3080' }), res)
     expect(h.bridged()).toBe(true)
     expect(captured.statusCode).toBe(0)
+  })
+
+  it('applies the same gate on an https listener', async () => {
+    registerCredentials('admin', 'secret1')
+    const h = harness('https:')
+    const denied = responseCapture()
+    await h.dispatch(request(), denied.res)
+    expect(h.bridged()).toBe(false)
+    expect(denied.captured.statusCode).toBe(401)
+
+    const allowed = responseCapture()
+    await h.dispatch(request({ cookie: sessionCookie('admin') }), allowed.res)
+    expect(h.bridged()).toBe(true)
+    expect(allowed.captured.statusCode).toBe(0)
   })
 })
