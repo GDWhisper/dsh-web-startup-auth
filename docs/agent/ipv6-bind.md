@@ -6,7 +6,7 @@
 
 dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（本插件双时代兼容的主要对象）：
 
-| | 0.2.0 线（rc.2 基线） | 0.2.1 线（alpha.2 起） |
+| | 0.2.0 线（rc.2，已被 0.2.1 取代为基线） | 0.2.1 线（alpha.2 起，**当前基线 rc.2**） |
 |---|---|---|
 | `WebServer.Config.host` | `z.union([z.const('127.0.0.1'), z.const('0.0.0.0')])`：只收两个 IPv4 字面量，`::` 启动即 schema 校验失败 | `z.transform(z.string(), …具体 IP 字面量…).required()`：只收**一个具体** IPv4/IPv6 字面量，通配 `0.0.0.0`/`::` 被显式拒绝（plain `Error`：「binding every interface would expose remote code execution to the network」） |
 | LAN 信任推导 | web-app `resolveLanTrust`：仅 `0.0.0.0` 绑定 → 枚举非 internal IPv4 接口地址，写入 `webRuntime.trustedHosts`，`connection` 行经 `!!js ctx.webRuntime.trustedHosts` 消费 | 整体删除（`webRuntime` 服务也删了）：`connection` 行改 `inject: [webStartup]` + `!!js ctx.webStartup.trustedHosts`，**LAN 推导移进 webStartup 提供方**——stock 不再推导，本插件接管 |
@@ -70,7 +70,7 @@ dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（�
 
 - **表达式两时代同一份**：0.2.1 线上与 stock 行**逐字一致**（上游注释即本范式：「The listener's bind IP is accepted separately from this list.」）；0.2.0 线上取代 `[...ctx.webRuntime.trustedHosts, …]` 的旧表达式——`webRuntime` 消费消失，信任表由我们的 startup 提供（rc.2 上与原 `resolveLanTrust + --trusted-host` 结果等值）。
 - **`inject` 里必须列 `webStartup`**：cordis 对 `!!js` 表达式里的 `ctx.<服务名>` 访问做注入门禁——没在 `inject` 声明的服务访问直接抛 `cannot get property ... without inject`（E2E 抓过）。**`webAuth` 是排序红线**：保证 auth 插件在 connection 注册 API 路由之前激活（不设防与设防的区别，见 `auth-mechanics.md`「路由保护顺序」）。
-- **`inject` 里必须列 `webServer`（E2E 抓出的回归，2026-10-12）**：connection 的 `HostConnectionService.register` 对**调用方上下文**执行 `owner.webServer.register(route)`，该属性访问按 connection 行的 inject 作用域过门禁——行里少了 `webServer`，第三方 `connection.rpc.handle` / `connection.fetch.register` 消费方（如 dsh-ntr，模块自身 `inject = ['webServer', 'connection']` 也救不了）激活即抛 `cannot get property "webServer" without inject`（connection lib 的 `register` 栈帧）。rc.2 与 0.2.1-alpha.2 双时代实测同样；**alpha.2 stock 行 `inject: [webStartup]` 同样有此缺口**，我们比 stock 多修一处。
+- **`inject` 里必须列 `webServer`（E2E 抓出的回归，2026-10-12）**：connection 的 `HostConnectionService.register` 对**调用方上下文**执行 `owner.webServer.register(route)`，该属性访问按 connection 行的 inject 作用域过门禁——行里少了 `webServer`，第三方 `connection.rpc.handle` / `connection.fetch.register` 消费方（如 dsh-ntr，模块自身 `inject = ['webServer', 'connection']` 也救不了）激活即抛 `cannot get property "webServer" without inject`（connection lib 的 `register` 栈帧）。rc.2 / 0.2.1-alpha.2 / 0.2.1-rc.2 三代实测同样（栈帧行号随上游变动：alpha.2 = lib:712、rc.2 = lib:871，2026-10-17 复现）；**alpha.2 stock 行 `inject: [webStartup]` 同样有此缺口**，我们比 stock 多修一处。
 - **行级 inject 与模块自身 inject 合并、非替换；patch 层之间则是替换**：loader 的 `Inject.resolve(fiber.entry.options.inject, fiber.inject)` 把行声明并进 fiber 已有的 inject 表（connection 模块自身的 `inject = ['credentials']` 不受影响）；但 profile 用户 patch 对同一行再写 `inject` 会**整体替换** bundle 层的列表（2026-10-12 实测：用户 patch 写 stock 形态 `[webStartup, webAuth]` → dsh-ntr 必炸）。三处（`webServer`/`webStartup`/`webAuth`）一个都不能少。
 - 表达式不带双引号是刻意的：js-yaml 普通标量只在 `[` 开头或含 `: ` 时才需要引号，`ctx.webStartup.trustedHosts` 两者皆无（上游 stock 同写法）。
 
@@ -101,6 +101,8 @@ dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（�
 > **0.2.1-alpha.2 触发警报（2026-10-12，前瞻）**：master（=alpha.2）把 `Config.host` 换成「任意具体 IP 字面量的 `z.transform` + 通配硬拒」，并删除 `resolveLanTrust`/`webRuntime` 服务。哨 1/4/6 同时触发，且**不是清理而是返工**：哨 1 只满足一半（具体 IPv6 放开了、通配仍禁；当时 union 兜底只救 `::`，`0.0.0.0` 实测 schema `ValidationError`）；哨 4 变成整行重写（`webRuntime` 删除 → 旧表达式悬空，回环/`0.0.0.0`/`::` 三连败，插件完全无法启动）；stock 推导整体消失 → `lanHosts` 接管 `0.0.0.0` 侧。适配清单与落地记录见 `docs/upgrade-dsh-0.2.0-playbook.md`「0.2.1-alpha.2 前瞻审查」与「适配落地（双时代兼容）」。
 >
 > **适配已落地并通过双时代 E2E（2026-10-12）**：widen 第二成员域放宽为任意 IPv4/IPv6 字面量（union fallthrough 兜底，fixture 钉死）、`lanHosts` 补 `0.0.0.0`/具体 IPv4 行、`connection` 行落官方表达式（新增发现：inject 必须保留 `webServer`，见上「connection 行走官方消费路径」第 3 条；哨 3/6 的新验证点是 `isBindAddressAuthority` 与 patch 层替换语义）。实机结果见下节「双时代实机验收」。**注意哨 4 的含义已变**：我们的行不再是纯 stock 镜像——比 stock 多 `webServer`（修其缺口）与 `webAuth`（排序红线），diff 时勿把这两处当偏差删掉。
+>
+> **0.2.1-rc.1 / rc.2 观察哨已跑（2026-10-17，Phase 2 bump）**：alpha 线转入 `next` 正式通道（`next` = `0.2.1-rc.2`，`latest` 仍 = `0.2.0-rc.2`），依赖 bump 到 `^0.2.1-rc.1`。哨 1–6 全部无触发——webserver 的 `Config.host` transform 与 alpha.2 零 diff（rc.1 只**新增** `bindUrlHost`/`getOrigin()` 两个导出，host schema 本体未动）、`resolveLanTrust`/`webRuntime` 依旧不存在（我们本就自给自足）、围栏三函数零 diff、web-app `connection` 行与 alpha.2 逐字一致（rc.1→rc.2 仅多一个无关 client 行 `ui-deepseek-model-label-1017`）、`connection/request` waterfall 零动。**镜像对象零 diff**：`COOKIE_PAYLOAD_VERSION = 1`（浏览器 cookie 仍 v1）、`requestAudience`/`sessionCookie`/`cookieName`/`STORED_SECRET_VERSION`/`SECRET_BYTES`/`AUTH_RECORD_KEY`/`parsePublicUrl`/`authenticatedUrl` 全部逐字未变。rc.1→rc.2 之间 7 个关联包的 `lib/` **逐字节相同**（只 `package.json` 版本/peer 稳定化）。隔离实例三形态实测见下节「0.2.1-rc.2 实机验收」。
 
 ## 实机验收（E2E 记录，2026-09-27，dsh 0.1.7-rc.1 + 本插件 link）
 
@@ -131,9 +133,26 @@ dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（�
 - flag 门禁：`--tls-cert` 单缺、`--tls-key` 单缺 → 成对报错 exit 1；畸形 `--public-url` → 校验报错 exit 1。
 - dsh-ntr canary 双重钉死：`[webServer, webStartup, webAuth]` 干净启动；把 profile 用户 patch 覆写成 stock 形态 `[webStartup, webAuth]` → `dsh: warning: 1 entry did not activate` / `dsh-ntr: cannot get property "webServer" without inject`（connection lib:712）——同时证明 **stock 行同样有此缺口** 与 **patch 层之间是替换而非合并**。
 
+## 0.2.1-rc.2 实机验收（E2E 记录，2026-10-17，Phase 2 bump 后）
+
+隔离实例 `/tmp/dsh-021-e2e`（`@deepseek-ai/dsh@0.2.1-rc.2`，`DSH_HOME=/tmp/dsh-021-home`，profile `link:` 本插件构建产物 + dsh-ntr canary），`--dump-config`：`web-startup` disabled、connection 行 `inject: [webServer, webStartup, webAuth]` + `trustedHosts` 表达式、webserver 行新增 `tls: !!js ctx.webStartup.tls`。
+
+**`--host 0.0.0.0`（端口 3199）**——十二探针全绿：回环 GET/ → **200 补签跳板**（cookie 名 = 该 audience 哈希，v1 payload）；远程 Host GET/ → **302 `/login`**；匿名 POST `/api/rpc` → **401**；匿名 `/api/auth/status` → `{"registered":false,"authenticated":false,"session":false,"trusted":false}`；注册/登录 → **双 cookie**（`dsh_sid` SameSite=Lax + 原生 cookie SameSite=Strict）；登录态 GET/ 远程 Host → **200**；登录态 POST `/api/rpc` → **404**（过围栏与原生 cookie 闸门、到达 bridge）；sid-only → **401**；陌生 Host + 会话 POST → **403**；陌生 Host + 会话 GET/ → **200 跳板**（150 B 跳板文档 + 为陌生 Host 签发的原生 cookie，非 SPA——与 rc.2/alpha.2 逐字节一致的非回归观察）；登出 → 双 cookie `Max-Age=0` 双清。
+
+**`--host 192.168.5.216` + TLS 自签（端口 3212，openssl 自签 SAN=LAN IP）**——https 全链绿：注册/登录 → 双 cookie 均带 `; Secure`；原生 cookie 名 = `dsh-auth-` + base64url(sha256(**`https://192.168.5.216:3212`**))（https 下 audience 取 origin，与计算值吻合）；sid-only 页面导航 → **200 跳板** + `; Secure` 原生 cookie；带真 cookie → **200 真 SPA**（41031 B）；POST 陌生 Host → **403**；LAN + 会话缺原生 cookie → **401**；双 cookie POST → **404**；登出 → 双 cookie `Max-Age=0` 且均带 `; Secure`。
+
+**`--host ::`（端口 3198，双栈）**——`127.0.0.1` 与 `[::1]` 各得 200 补签跳板且 **cookie 名互不相同**（按 audience 绑定）；LAN IPv4 与本机全局 IPv6 Host 无会话 GET/ → **302 `/login`**；匿名 POST → **401**；陌生 `[2001:db8::99]` + 会话 POST → **403**；LAN + 双 cookie POST → **404**；全局 IPv6 + 双 cookie POST → **401**（原生 cookie 绑在 LAN audience 上，换 Host 即失效，符合设计）；LAN GET/ + 双 cookie → **200**。
+
+**flag 门禁**：`--tls-cert` 单缺 / `--tls-key` 单缺 → `error: --tls-cert and --tls-key must be supplied together`（exit 1）；畸形 `--public-url` → `error: --public-url must be an absolute http or https URL of the form http(s)://host[/prefix]`；含空格 → `must not contain ASCII whitespace or control characters`——三条文案与上游逐字一致。
+
+**dsh-ntr canary**：`[webServer, webStartup, webAuth]` 干净激活（零 warning）；把 profile 用户 patch 覆写成 stock 形状 `[webStartup, webAuth]` → `dsh: warning: 1 entry did not activate` + `dsh-ntr (dsh-ntr): Error: cannot get property "webServer" without inject`，栈帧 **connection lib:871**（alpha.2 为 :712，上游行号变动、机制不变）。含 canary 的实例上复跑登录墙冒烟（注册/登录双 cookie、匿名 401、登录态 404、陌生 Host 403、`/login` 公开）全绿。
+
+**探针踩坑记录（2026-10-17，非产品缺陷）**：① `grep -v '^#'` 会把 curl cookie jar 里 HttpOnly 行（`#HttpOnly_<domain>`）整行滤掉，导致后续探针静默丢 cookie——读 jar 勿滤 `#` 行；② `sed 's/.*=\([^;]*\).*/\1/'` 取 `Set-Cookie` 值时，贪婪 `.*=` 会咬到 `SameSite=`/`Max-Age=`，取回 `Strict`/`2592000` 之类——必须锚定前缀 `s/^[Ss]et-[Cc]ookie: <name>=\([^;]*\).*/\1/`。用错值时上游返回 **400**（webserver 顶层 listener 把 handler 异常转成 400），曾被误判为兼容性回归。
+
 ## 测试要点（`tests/`）
 
-- `tests/ipv6-shim.spec.ts`：`widenHostMember` 在独立 fixture schema 上验拓宽（stock 两时代形状都过：union 与 plain-Error 拒绝通配的 transform；`::`/`::1`/`fd00::1`/具体 IPv4 ACCEPT 且值保持、`example.com` 仍拒、`port` 字段仍校验、其他成员默认值与 `required` 不变）、幂等、异形 schema 返回 false、**plain-Error 成员经 union fallthrough 的兜底 fixture**；`ensureIpv6BindSupport`（坏 baseUrl → false；无 baseUrl → 拓宽 import 实例；`vi.resetModules()` + 动态 import 验首次尝试语义与进程内幂等）；`supportsTlsConfig`（import 实例 rc.2 无 `tls` → false；坏 baseUrl → false；`mkdtemp` fixture profile 根的 webserver 带 `tls` → true）；`canonicalIpv6`（含拒 zone/DNS/畸形）；`normalizeBindHost` 值域（含**具体 IPv4 透传**、方括号归一、非规范拼写规范化、拒 DNS/zone/IPv4-mapped）；`lanHosts` 矩阵（mock `node:os`：`0.0.0.0` → 非 internal IPv4 列表、具体 IPv4 → `[自身]`、`::` → 双家族、规范拼写 + 方括号 + 无端口 + 过围栏装载期断言、接口枚举失败回 `[]`）。
-- `tests/startup.spec.ts`：`--host ::`/`[::1]`/非规范拼写的 `webStartup.host` 归一；**trustedHosts 富化**（`0.0.0.0` → LAN 列表；`::` → `--trusted-host` 序在前 + 双家族；具体 IPv4 → `[自身]`）；`--public-url`/`--tls-cert`/`--tls-key` 透传（fixture 根）与门禁（rc.2 实例上 exit 1）；`--tls-cert` 单缺 → 成对报错；非法 `--public-url` → exit 1。
+- `tests/ipv6-shim.spec.ts`：`widenHostMember` 在独立 fixture schema 上验拓宽（stock 两时代形状都过：union 与 plain-Error 拒绝通配的 transform；`::`/`::1`/`fd00::1`/具体 IPv4 ACCEPT 且值保持、`example.com` 仍拒、`port` 字段仍校验、其他成员默认值与 `required` 不变）、幂等、异形 schema 返回 false、**plain-Error 成员经 union fallthrough 的兜底 fixture**；`ensureIpv6BindSupport`（坏 baseUrl → false；无 baseUrl → 拓宽 import 实例；`vi.resetModules()` + 动态 import 验首次尝试语义与进程内幂等）；`supportsTlsConfig`（**无 baseUrl → true，因为导入的包就是 0.2.1 线**；坏 baseUrl → false；`mkdtemp` fixture profile 根的 webserver**不带** `tls` → false、带 `tls` → true）；`canonicalIpv6`（含拒 zone/DNS/畸形）；`normalizeBindHost` 值域（含**具体 IPv4 透传**、方括号归一、非规范拼写规范化、拒 DNS/zone/IPv4-mapped）；`lanHosts` 矩阵（mock `node:os`：`0.0.0.0` → 非 internal IPv4 列表、具体 IPv4 → `[自身]`、`::` → 双家族、规范拼写 + 方括号 + 无端口 + 过围栏装载期断言、接口枚举失败回 `[]`）。
+- `tests/startup.spec.ts`：`--host ::`/`[::1]`/非规范拼写的 `webStartup.host` 归一；**trustedHosts 富化**（`0.0.0.0` → LAN 列表；`::` → `--trusted-host` 序在前 + 双家族；具体 IPv4 → `[自身]`）；`--public-url`/`--tls-cert`/`--tls-key` 透传（fixture 根）与门禁（**显式「无能力」fixture 根** → exit 1）；`--tls-cert` 单缺 → 成对报错；非法 `--public-url` → exit 1。
+- **基线前移会改测试写法（2026-10-17 踩过）**：能力门禁的两个「不支持」断言原本靠「导入的 rc.2 webserver 无 `tls` 成员」成立；依赖 bump 到 0.2.1 后该探测**正确**返回 true，两个用例随即红。**这不是缺陷**——门禁按实际安装的 harness 判断，正是设计。修法是把「无能力」形状改成显式 fixture（`dict: { host: {} }`），而不是把断言反过来。凡以「当前安装的上游版本」为前提的断言都要这样显式化，否则下次 bump 又会红。
 - **单测摸不到启动路径的那份实例**（双实例分歧，见观察哨 2）：「拓宽后通配能启动」「TLS 门禁真的按 profile 根的 webserver 判断」只有 E2E 能证明，单测全绿不等于能用——这正是本功能第一版翻车点。
 - **`program.error` 在单测里可观测**：`dsh-cmdline` 的 `parseCmdline` 对整棵命令树 `exitOverride()` 并把 CommanderError 路由到 `ctx.appExit`（`configureExitAndOutput`）——单测以 `exitCodes` 观测 exit 1，非法 host/成对校验/门禁路径都被单测覆盖（旧说明「走 process.exit 单测不触达」已失效）。

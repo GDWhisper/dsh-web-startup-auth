@@ -8,7 +8,7 @@
 
 原版 `@deepseek-ai/dsh-web-app/startup`（`packages/bundle/web-app/src/startup.ts`）对 `--host` 值域设墙（rc.2：`0.0.0.0` 硬拒绝于 ~69 行；0.2.1 行反转：通配全拒、只收具体 IP 字面量）。本插件用两个子模块替换并补上认证：
 
-1. **`remote-web-startup`**：行为与原版一致，只是**放开 `--host` 值域**——接受 `127.0.0.1`/`0.0.0.0`（rc.2 原样 + 拓宽 schema 供具体 IP 字面量）与任意具体 IPv4/IPv6 字面量（#35，上游 webserver 的 `host` schema 原地拓宽，见 `ipv6-bind.md`），并提供 `--public-url`/`--tls-cert`/`--tls-key` 官方新能力透传（0.2.1+，0.2.0 线明确报错拒绝）。安全责任转移到 auth 插件。
+1. **`remote-web-startup`**：行为与原版一致，只是**放开 `--host` 值域**——通配 `0.0.0.0`/`::`（上游 0.2.1 起硬拒，由我们原地拓宽 schema 恢复）与任意具体 IPv4/IPv6 字面量（#35，上游 webserver 的 `host` schema 原地拓宽，见 `ipv6-bind.md`），并提供 `--public-url`/`--tls-cert`/`--tls-key` 官方新能力透传（0.2.1+，0.2.0 线明确报错拒绝）。安全责任转移到 auth 插件。
 2. **`web-auth`**：强制远程访问者登录——登录/注册页（`/login`）+ 签名会话 cookie + 全部 `/api` 路由保护（`/api/auth/*` 除外）。免认证的只有**真正的回环请求**（见 `auth-mechanics.md`「信任判定」），与启动参数无关。**dsh 0.1.2 起**上游自带浏览器认证且回环不豁免，本插件额外做「原生 cookie 补签」桥接（见 `native-auth-bridge.md`）——0.1.1 时代的「Host/Origin 回环改写」已随上游删除 `PRIVILEGED_METHODS` 而移除。
 3. **`auth-reset` 子命令**：`dsh --profile web auth-reset [--password <pwd>] [--username <name>]`，重设管理员密码和/或修改用户名并**轮换签名密钥**（所有已发会话 cookie 立即失效）——忘记密码、忘记用户名、修复含控制字符用户名的恢复路径。只给 `--username` 时密码保持不变；都不给时交互式输入新密码（历史行为）。
 4. **设置面板「认证」标签页**：前端插件通过 `ctx.slots.inject('settings.section', …)` 注册，提供退出登录（调 `/api/auth/logout`）、修改用户名与修改密码（分别调 `/api/auth/change-username` / `/api/auth/change-password`，服务端校验当前密码后轮换密钥并重签当前会话）以及会话有效期档位选择（调 `/api/auth/session-max-age`，下拉即选即存）。详见 `settings-section.md`。

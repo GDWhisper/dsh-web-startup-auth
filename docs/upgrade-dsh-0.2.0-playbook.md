@@ -263,3 +263,59 @@
 - **dsh-ntr canary 双重钉死**：`[webServer, webStartup, webAuth]` 干净启动；把 profile 用户 patch 覆写成 stock 形态 `[webStartup, webAuth]` → `dsh: warning: 1 entry did not activate` + `dsh-ntr (dsh-ntr): Error: cannot get property "webServer" without inject`（connection lib:712）——同时证明 stock 行同缺口与 patch 层替换语义；恢复后干净。
 
 补充观察（分类为非回归）：会话有效但 `Host` 陌生时，**GET/HEAD** 会先被补签分支接走（303/200 跳板 + 为该陌生 Host 签发的原生 cookie），**POST** 才落到围栏 403——rc.2 与 alpha.2 行为逐字节一致（旧代码同路径），且跳板后的后续请求仍被围栏 403，cookie 无从生效。威胁模型上：浏览器只会在**该 Host 自己登录过**的 origin 带 `dsh_sid`，与「反代真实 Host + `--trusted-host`」的合法补签同一路径。
+
+---
+
+# Phase 2 bump（2026-10-17，0.2.1-rc.2）
+
+> 触发时机命中 `docs/release-guide.md`「发版触发时机」：dsh 的 0.2.1 线由 `alpha` 转入 `next` 正式通道，故本次 bump 与发版（v0.1.13）同批执行。**用户判定 `next` 可视同正式版**（10-17 会话决定）。
+
+## dist-tag 快照（2026-10-17）
+
+| dist-tag | `@deepseek-ai/dsh` | 说明 |
+|---|---|---|
+| `latest` | **0.2.0-rc.2** | 正式版仍未发布 |
+| `next` | **0.2.1-rc.2** | 当日 03:17 发 rc.1、08:36 发 rc.2；6 包同步 |
+| `alpha` | 0.2.1-alpha.5 | 停在 10-16 |
+
+`^0.2.1-rc.1` 的 caret 范围 `>=0.2.1-rc.1 <0.3.0`，因 `0.2.1-rc.2` 与 comparator 同 `[0,2,1]` 元组而被自动解析——**0.2.1 线内的 rc 补丁不需手动 bump**（与「跨 minor 必须手动」不矛盾）。
+
+## 审查结论：源码零改动
+
+**rc.1 → rc.2 近乎空跑**：7 个关联包（web-app / client-connection / host-webserver / credentials / cmdline / client-ui-settings / client-ui-slots）的 `lib/` **逐字节相同**，只有 `package.json` 的版本号与 peer 稳定化（`~4.0.5-alpha.1` → `~4.0.5`、`~3.18.5-alpha.1` → `~3.18.5`），外加 web-app `cordis.patch.yml` 多一个无关 client 行 `ui-deepseek-model-label-1017`。**patch 目标行（`connection`/`web-runtime`/`webserver`）与全部镜像对象零 diff。**
+
+**镜像对象核查（对照 alpha.2 → rc.1 → rc.2 三代）**：
+
+| 镜像点 | 结论 |
+|---|---|
+| `COOKIE_PAYLOAD_VERSION = 1` | 未变——浏览器 cookie 仍 v1，我们补签的就是 v1（v2 只用于新 `/connect` 换发的 API operator cookie，带 `id` 字段） |
+| `requestAudience` / `sessionCookie` / `cookieName` | 逐字未变（含 `; Secure` 分支） |
+| `STORED_SECRET_VERSION = 1` / `SECRET_BYTES = 32` / `AUTH_RECORD_KEY` | 逐字未变 |
+| `connection/request` waterfall | 未变——注册包装 + waterfall 双层闸门继续成立 |
+| web-app `connection` 行 | rc.1 与 alpha.2 逐字一致（`inject: [webStartup]` + `trustedHosts` 表达式），我们的 `[webServer, webStartup, webAuth]` 是超集 |
+| `parsePublicUrl` | 25 行逐字一致（含全部错误文案） |
+| webserver `Config.host` schema | 未变；rc.1 只**新增** `bindUrlHost`/`getOrigin()` 导出（`port` getter 变 `number \| undefined`） |
+| `authenticatedUrl` | 逐字未变——浏览器开 URL 仍走 `/?token=`（索引路由），被我们的墙接管 |
+| `dsh-credentials` | **纯注释 diff**（1 hunk，0 行非注释变更） |
+| `dsh-cmdline` | 只版本号 + peer 稳定化，`lib/` 未变 |
+| `ui-slots` | 纯增量（`inline?: true`、`KeyedStandardSource` 增可选参） |
+| `ui-settings` | `SettingsDescribeMirror` 去掉 `unavailable` 状态与 `persistence` 构造参——**我们不消费**（client 插件只注册 `settings.section`） |
+
+**cordis peer 待跟进项消解**：cordis 4.0.5 **稳定版** 10-16 发布（`latest` = 4.0.5），`^4.0.1` 直接兼容，peer 未放宽。peer 门禁 `>=0.1.7-rc.1 <0.3.0-0` 对 rc.1/rc.2 实证干净安装（`npm install --dry-run` 无 ERESOLVE、无 peer 警告）。`schemastery` 解析到 3.18.5，满足 `^3.18.1`。
+
+**0.2.1 新增 `/connect` exact 路由（非回归，设计取舍留档）**：rc.1 起 connection 自己注册 `GET /connect?token=…`，用 launch token 换 **v2** cookie 并 302 到 `./api/remote.mux`，供 API 客户端引导。它不在我们 `isPublicRoute` 里，会被墙挡住——但 alpha.2 的等价流程（`/?token=` 走索引路由）**也一直被墙挡住**，行为对等。是否放开是主动选择（放开属"放松"而非"修复"），本次未动。
+
+## 构建探针
+
+- 依赖 bump 后：`npm run typecheck` 0 错；**230/230**（rc.2 基线时为 229——拆了一个能力门禁用例成两个分支）；`npm run build` 通过，`lib/client.js` 48.81 kB 与 rc.2 基线逐字节未变。
+- **两处测试改写（非缺陷）**：`tests/ipv6-shim.spec.ts`「reports false for the installed 0.2.0-line webserver」与 `tests/startup.spec.ts`「rejects TLS / --public-url on a harness without those capabilities」原本以「导入的 rc.2 webserver 无 `tls` 成员」为隐含前提；bump 后 `supportsTlsConfig()` **正确**返回 true、flag 正常透传，两个用例随之红。修法 = 把「无能力」形状显式化成 fixture（`dict: { host: {} }`），新增 `tlsIncapableBootRoot()` helper，**不把断言反过来**。凡以「当前安装的上游版本」为前提的断言都该这样显式化。
+
+## 隔离实例实机（`/tmp/dsh-021-e2e` = 0.2.1-rc.2，`DSH_HOME=/tmp/dsh-021-home`）
+
+完整探针矩阵（三形态 + flag 门禁 + canary + 踩坑记录）记在 `docs/agent/ipv6-bind.md`「0.2.1-rc.2 实机验收」。要点：
+
+- `--dump-config`：`web-startup` disabled；connection 行 `inject: [webServer, webStartup, webAuth]` + `trustedHosts: !!js ctx.webStartup.trustedHosts`；webserver 行新增 `tls: !!js ctx.webStartup.tls`。
+- `--host 0.0.0.0`（3199）十二探针全绿；`--host 192.168.5.216` + TLS 自签（3212）https 全链绿（原生 cookie 名 = `sha256("https://192.168.5.216:3212")`、双 cookie `; Secure`、真 SPA 200 41031 B）；`--host ::`（3198）双栈围栏矩阵全绿。
+- flag 门禁三条文案与上游逐字一致。
+- **dsh-ntr canary 三代钉死**：`[webServer, webStartup, webAuth]` 干净激活（零 warning）；覆写成 stock 形状 `[webStartup, webAuth]` → `cannot get property "webServer" without inject`，栈帧 **connection lib:871**（alpha.2 为 :712——上游行号变动、机制不变，canary 的价值正在于不依赖行号）。
+- **探针踩坑（非产品缺陷）**：curl cookie jar 的 `#HttpOnly_` 行被 `grep -v '^#'` 滤掉致探针静默丢会话；`sed 's/.*=\([^;]*\).*/\1/'` 取 `Set-Cookie` 值时贪婪匹配咬到 `SameSite=`/`Max-Age=`，取回 `Strict`/`2592000`，上游随即返回 **400**（webserver 顶层 listener 把 handler 异常转 400）——一度被误判为兼容性回归，锚定 cookie 名后全绿。
