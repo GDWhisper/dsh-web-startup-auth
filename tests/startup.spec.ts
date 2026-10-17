@@ -63,6 +63,22 @@ function tlsCapableBootRoot(): string {
   return pathToFileURL(`${root}/`).href
 }
 
+/**
+ * The pre-0.2.1 shape: a webserver whose Config declares no `tls` member, so
+ * the capability probe reports false. Needed because the installed package is
+ * itself the 0.2.1 line — an incapable harness can no longer be expressed by
+ * omitting the base URL.
+ */
+function tlsIncapableBootRoot(): string {
+  const root = mkdtempSync(join(tmpdir(), 'dsh-web-startup-boot-'))
+  bootRoots.push(root)
+  const pkg = join(root, 'node_modules', '@deepseek-ai', 'dsh-host-webserver')
+  mkdirSync(pkg, { recursive: true })
+  writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-host-webserver', version: '0.0.0', main: 'index.js' }))
+  writeFileSync(join(pkg, 'index.js'), 'module.exports = { WebServer: { Config: { dict: { host: {} } } } }\n')
+  return pathToFileURL(`${root}/`).href
+}
+
 function makeFakeContext(baseUrl?: string) {
   const provided = new Map<string, unknown>()
   const exitCodes: number[] = []
@@ -224,14 +240,16 @@ describe('remote web-startup', () => {
   })
 
   it('rejects TLS / --public-url on a harness without those capabilities', () => {
-    // The imported rc.2 webserver Config has no `tls` member: the probe must
-    // fail the flags loudly instead of letting the rows ignore them.
-    const tlsCtx = makeFakeContext()
+    // The pre-0.2.1 webserver Config has no `tls` member: the probe must fail
+    // the flags loudly instead of letting the rows ignore them. The incapable
+    // shape is pinned by an explicit fixture — the installed package is itself
+    // the 0.2.1 line, so it cannot stand in for the old harness.
+    const tlsCtx = makeFakeContext(tlsIncapableBootRoot())
     runStartup(tlsCtx, ['--host', '127.0.0.1', '--tls-cert', '/tmp/chain.pem', '--tls-key', '/tmp/key.pem'])
     expect(tlsCtx.exitCodes).toEqual([1])
     expect(tlsCtx.get(WEB_STARTUP_SERVICE)).toBeUndefined()
 
-    const urlCtx = makeFakeContext()
+    const urlCtx = makeFakeContext(tlsIncapableBootRoot())
     runStartup(urlCtx, ['--host', '127.0.0.1', '--public-url', 'https://app.example/'])
     expect(urlCtx.exitCodes).toEqual([1])
     expect(urlCtx.get(WEB_STARTUP_SERVICE)).toBeUndefined()

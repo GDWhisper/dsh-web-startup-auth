@@ -135,9 +135,27 @@ describe('ensureIpv6BindSupport', () => {
 })
 
 describe('supportsTlsConfig', () => {
-  it('reports false for the installed 0.2.0-line webserver and for unresolvable roots', () => {
-    expect(supportsTlsConfig()).toBe(false)
+  // The imported package IS the 0.2.1 line once the dependencies are bumped,
+  // so the no-baseUrl arm reports true. The pre-0.2.1 shape is pinned through
+  // an explicit incapable fixture instead of through the installed version —
+  // the baseline must not silently decide what this test asserts.
+  it('reports true for the installed webserver, which is the 0.2.1 line', () => {
+    expect(supportsTlsConfig()).toBe(true)
+  })
+
+  it('reports false for unresolvable roots and incapable webservers', () => {
     expect(supportsTlsConfig('file:///nonexistent-profile-root/')).toBe(false)
+    const root = mkdtempSync(join(process.env.TMPDIR ?? '/tmp', 'dsh-boot-webserver-'))
+    try {
+      const pkg = join(root, 'node_modules', '@deepseek-ai', 'dsh-host-webserver')
+      mkdirSync(pkg, { recursive: true })
+      writeFileSync(join(pkg, 'package.json'), JSON.stringify({ name: '@deepseek-ai/dsh-host-webserver', version: '0.0.0', main: 'index.js' }))
+      // The pre-0.2.1 Config: no `tls` member at all.
+      writeFileSync(join(pkg, 'index.js'), 'module.exports = { WebServer: { Config: { dict: { host: {} } } } }\n')
+      expect(supportsTlsConfig(pathToFileURL(`${root}/`).href)).toBe(false)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   it('reports true when the boot-path webserver declares a tls member', () => {
