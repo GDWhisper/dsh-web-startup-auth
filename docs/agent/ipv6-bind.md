@@ -6,7 +6,7 @@
 
 dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（本插件双时代兼容的主要对象）：
 
-| | 0.2.0 线（rc.2，已被 0.2.1 取代为基线） | 0.2.1 线（alpha.2 起，**当前基线 rc.2**） |
+| | 0.2.0 线（rc.2，已被 0.2.1 取代为基线） | 0.2.1 线（alpha.2 起，**当前基线 rc.5**） |
 |---|---|---|
 | `WebServer.Config.host` | `z.union([z.const('127.0.0.1'), z.const('0.0.0.0')])`：只收两个 IPv4 字面量，`::` 启动即 schema 校验失败 | `z.transform(z.string(), …具体 IP 字面量…).required()`：只收**一个具体** IPv4/IPv6 字面量，通配 `0.0.0.0`/`::` 被显式拒绝（plain `Error`：「binding every interface would expose remote code execution to the network」） |
 | LAN 信任推导 | web-app `resolveLanTrust`：仅 `0.0.0.0` 绑定 → 枚举非 internal IPv4 接口地址，写入 `webRuntime.trustedHosts`，`connection` 行经 `!!js ctx.webRuntime.trustedHosts` 消费 | 整体删除（`webRuntime` 服务也删了）：`connection` 行改 `inject: [webStartup]` + `!!js ctx.webStartup.trustedHosts`，**LAN 推导移进 webStartup 提供方**——stock 不再推导，本插件接管 |
@@ -103,6 +103,8 @@ dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（�
 > **适配已落地并通过双时代 E2E（2026-10-12）**：widen 第二成员域放宽为任意 IPv4/IPv6 字面量（union fallthrough 兜底，fixture 钉死）、`lanHosts` 补 `0.0.0.0`/具体 IPv4 行、`connection` 行落官方表达式（新增发现：inject 必须保留 `webServer`，见上「connection 行走官方消费路径」第 3 条；哨 3/6 的新验证点是 `isBindAddressAuthority` 与 patch 层替换语义）。实机结果见下节「双时代实机验收」。**注意哨 4 的含义已变**：我们的行不再是纯 stock 镜像——比 stock 多 `webServer`（修其缺口）与 `webAuth`（排序红线），diff 时勿把这两处当偏差删掉。
 >
 > **0.2.1-rc.1 / rc.2 观察哨已跑（2026-10-17，Phase 2 bump）**：alpha 线转入 `next` 正式通道（`next` = `0.2.1-rc.2`，`latest` 仍 = `0.2.0-rc.2`），依赖 bump 到 `^0.2.1-rc.1`。哨 1–6 全部无触发——webserver 的 `Config.host` transform 与 alpha.2 零 diff（rc.1 只**新增** `bindUrlHost`/`getOrigin()` 两个导出，host schema 本体未动）、`resolveLanTrust`/`webRuntime` 依旧不存在（我们本就自给自足）、围栏三函数零 diff、web-app `connection` 行与 alpha.2 逐字一致（rc.1→rc.2 仅多一个无关 client 行 `ui-deepseek-model-label-1017`）、`connection/request` waterfall 零动。**镜像对象零 diff**：`COOKIE_PAYLOAD_VERSION = 1`（浏览器 cookie 仍 v1）、`requestAudience`/`sessionCookie`/`cookieName`/`STORED_SECRET_VERSION`/`SECRET_BYTES`/`AUTH_RECORD_KEY`/`parsePublicUrl`/`authenticatedUrl` 全部逐字未变。rc.1→rc.2 之间 7 个关联包的 `lib/` **逐字节相同**（只 `package.json` 版本/peer 稳定化）。隔离实例三形态实测见下节「0.2.1-rc.2 实机验收」。
+
+> **0.2.1-rc.5 观察哨已跑（2026-11-03）**：`next`/`latest` = `0.2.1-rc.5`（`alpha` = 0.2.2-alpha.2）。哨 1–6 全部无触发——`webserver/src/index.ts`（host schema、`bindUrlHost`/`getOrigin`）、`web-app/src/startup.ts`、`web-app/src/public-url.ts` 与 `connection/src/index.ts` 逐字未变；web-app `cordis.patch.yml` 仅多一行无关 client 行（`ui-entry-customization`）。依赖仍是 `^0.2.1-rc.1`，lock 已解析到 rc.5；隔离实例 `--host 0.0.0.0`（LAN 电池）与 `--host ::`（双栈：v4/v6 回环 200、LAN 302 `/login`）均正常启动，四注入 + `trustedHosts` 表达式见 `--dump-config`。
 
 ## 实机验收（E2E 记录，2026-09-27，dsh 0.1.7-rc.1 + 本插件 link）
 

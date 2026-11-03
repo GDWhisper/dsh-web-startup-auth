@@ -4,7 +4,7 @@
 
 [DSH（DeepSeek Harness）](https://github.com/deepseek-ai/deepseek-harness)远程 Web 启动 + 用户名/密码认证插件。
 
-> **⚠️ 版本跟进声明**：本项目只跟进官方 dsh 的正式发布通道（`next` dist-tag），不跟进 `alpha` 预览通道（当前基线：dsh **0.2.1-rc.2**，依赖 5 个 `@deepseek-ai/dsh-*` 已 bump 到 `^0.2.1-rc.1`（caret 在 0.2.1 线内自动解析到最新 rc）；适配审查与观察哨见 `docs/upgrade-dsh-0.2.0-playbook.md`）。**0.2.1 线双时代兼容已落地并随 bump 生效**（通配 `--host` 的 schema 拓窗、LAN 信任的官方消费路径、TLS/`--public-url` 透传；在 0.2.1 之前的 dsh 上这些新 flag 会明确报错而非静默忽略）。
+> **版本跟进**：只跟进官方 dsh 的 `next` 通道，不跟 `alpha`。当前基线 dsh **0.2.1-rc.5**；依赖声明 `^0.2.1-rc.1`，同线新版由 caret 自动解析。适配审查见 `docs/upgrade-dsh-0.2.0-playbook.md`。
 
 ![登录页](docs/login-page.png)
 
@@ -24,7 +24,7 @@
 - **设置面板「认证」标签页**：向 DSH 设置面板注入"认证"页，提供**退出登录**（仅在持有会话时出现）、**修改用户名**、**修改密码**与**会话有效期**档位选择。标签在导航栏里显示**盾牌+勾**图标（上游不允许注册方指定图标，由本插件在前端替换默认的齿轮）。界面颜色全部使用 DSH 主题 token，**跟随明/暗主题自动切换**（#25）。
 - **远程场景修复**（局域网 HTTP 访问的坑）：
   - `crypto.randomUUID` polyfill —— 非安全上下文下该 API 缺失，会导致所有 RPC 失败。
-  - 原生浏览器认证桥接 —— dsh 0.1.2 起（当前基线 0.2.1-rc.2）上游自带浏览器认证（`dsh-auth-*` 签名 cookie），`/api` 与 `index.html` 一律要求携带、**连回环都不豁免**（本机也得先换 token URL）。本插件为已通过自己认证（`dsh_sid` 会话，或 TCP 对端 + `Host` 双回环的本地请求）的访问者**自动补发该 cookie**：页面导航经一次 200 跳板（meta refresh 回原路径）即带上、登录响应直接下发（不用 3xx：重定向响应里新设的 cookie 不会带给重定向目标，补发会被逐跳重放成 `ERR_TOO_MANY_REDIRECTS`），全程无需接触启动打印的 token URL——「账号/密码 + 可撤销会话」仍是唯一认证入口，上游 cookie 只是通过上游闸门的凭据。
+  - 原生浏览器认证桥接 —— dsh 0.1.2 起（当前基线 0.2.1-rc.5）上游自带浏览器认证（`dsh-auth-*` 签名 cookie），`/api` 与 `index.html` 一律要求携带、**连回环都不豁免**（本机也得先换 token URL）。本插件为已通过自己认证（`dsh_sid` 会话，或 TCP 对端 + `Host` 双回环的本地请求）的访问者**自动补发该 cookie**：页面导航经一次 200 跳板（meta refresh 回原路径）即带上、登录响应直接下发（不用 3xx：重定向响应里新设的 cookie 不会带给重定向目标，补发会被逐跳重放成 `ERR_TOO_MANY_REDIRECTS`），全程无需接触启动打印的 token URL——「账号/密码 + 可撤销会话」仍是唯一认证入口，上游 cookie 只是通过上游闸门的凭据。
 
 ## 安装
 

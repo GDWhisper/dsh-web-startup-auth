@@ -319,3 +319,15 @@
 - flag 门禁三条文案与上游逐字一致。
 - **dsh-ntr canary 三代钉死**：`[webServer, webStartup, webAuth]` 干净激活（零 warning）；覆写成 stock 形状 `[webStartup, webAuth]` → `cannot get property "webServer" without inject`，栈帧 **connection lib:871**（alpha.2 为 :712——上游行号变动、机制不变，canary 的价值正在于不依赖行号）。
 - **探针踩坑（非产品缺陷）**：curl cookie jar 的 `#HttpOnly_` 行被 `grep -v '^#'` 滤掉致探针静默丢会话；`sed 's/.*=\([^;]*\).*/\1/'` 取 `Set-Cookie` 值时贪婪匹配咬到 `SameSite=`/`Max-Age=`，取回 `Strict`/`2592000`，上游随即返回 **400**（webserver 顶层 listener 把 handler 异常转 400）——一度被误判为兼容性回归，锚定 cookie 名后全绿。
+
+---
+
+## 基线复核（2026-11-03，0.2.1-rc.5）
+
+`next` = `latest` = **0.2.1-rc.5**（`alpha` = 0.2.2-alpha.2）。**插件存活、源码零改动。**
+
+- **静态 diff**（harness `dsh-v0.2.1-rc.2` → `dsh-v0.2.1-rc.5`）：9 个镜像/耦合对象逐字未变——`browser-auth.ts`、`api-request-trust.ts`、`rpc-host.ts`、`connection/src/index.ts`（`connection/request` waterfall）、`webserver/src/index.ts`（host schema）、`web-app/src/startup.ts`、`public-url.ts`、`ui-settings slots.ts`、`modules/src/index.ts`；前端钩子 `__DSH_BOOT__`/`__ModuleLoader__`/`__DSH_TRANSPORT__`/`isLoopback`/`ownsHost` 出现次数与 rc.2 一致。web-app `cordis.patch.yml` 仅多 5 行（新增 `ui-entry-customization` client 行，与本插件无关）；其余改动集中在 `llm-deepseek`（模型目录/官方列表）、`mcp-client` 与快照文件。
+- **构建探针**（`/tmp/dsh-auth-probe-0215`，5 依赖装 rc.5 跑）：typecheck 0 错 / **230/230** / `lib/client.js` 48.81 kB，sha256 与仓库产物一致。
+- **隔离实例实机**（rc.5 CLI + 独立 `DSH_HOME`）：`--dump-config` 三行齐全 + 四注入 + `trustedHosts` 表达式；`--host 0.0.0.0` LAN 电池全绿（匿名导航 302 `/login`、匿名 API 401、登录/注册双 cookie、authed 页面 200、authed API 到 bridge 404、仅原生 cookie 401、仅 `dsh_sid` 303 补签、登出清理、匿名 bundle 401、authed 合并 bundle 含本插件 `client.js`）；`--host ::` 双栈启动正常（v4/v6 回环 200、LAN 302 `/login`）。
+- **依赖动作**：声明保持 `^0.2.1-rc.1`（caret 覆盖 rc.5），`npm update` 把 lock 解析到 rc.5；无需 bump 声明，也无需发版。
+- **实测口径（易误判）**：**回环请求默认被信任**，从 `127.0.0.1` 探测只会看到 303 补签/200，不代表登录墙放行；匿名用例必须用 LAN 地址，且带 `accept: text/html` 才走 302（否则按非导航处理，返回 JSON 401）。
