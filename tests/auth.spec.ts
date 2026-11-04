@@ -1136,6 +1136,237 @@ describe('index fallback seat wrapping', () => {
   })
 })
 
+// 0.2.2 serves the SPA fallback and the client-bundle prefix route as
+// `{ resource }` (Fetch Request -> Response). That Request carries no socket,
+// so the session boundary runs at the http dispatcher (`serveResource`),
+// which still holds the node request; handler-form wrapping stays as-is for
+// the 0.2.1 line.
+describe('resource-form routes and fallback (dsh 0.2.2+)', () => {
+  type ResourceFn = (request: Request, peer?: unknown) => Promise<Response>
+
+  interface ResourceRoute {
+    kind: 'exact' | 'prefix'
+    path: string
+    resource: ResourceFn
+  }
+
+  const html = (body: string, type = 'text/html'): Response =>
+    new Response(body, { status: 200, headers: { 'content-type': type } })
+
+  /** Fake webServer with 0.2.2's resource dispatcher and route shapes. */
+  function fakeResourceWebAuthContext(opts: {
+    bindHost?: string
+    preResources?: ResourceRoute[]
+    preFallback?: { resource: ResourceFn }
+    credentials?: unknown
+    dispatcher?: boolean
+  } = {}) {
+    const routes: Array<WebRoute | ResourceRoute> = []
+    const webServer: Record<string, unknown> = {
+      host: opts.bindHost ?? '0.0.0.0',
+      port: 3080,
+      exact: new Map<string, unknown>(),
+      prefixes: new Map<string, unknown>(),
+      upgrades: new Map<string, unknown>(),
+      fallback: opts.preFallback,
+      register: (route: WebRoute | ResourceRoute) => {
+        routes.push(route)
+        const table = route.kind === 'exact' ? webServer.exact : webServer.prefixes
+        ;(table as Map<string, unknown>).set(route.path, route)
+        return () => {}
+      },
+      registerUpgrade: (route: { path: string }) => {
+        ;(webServer.upgrades as Map<string, unknown>).set(route.path, route)
+        return () => {}
+      },
+      registerFallback: (fallback: WebRoute['handler'] | { resource: ResourceFn }) => {
+        webServer.fallback = fallback
+        return () => { webServer.fallback = undefined }
+      },
+      tapIndex: () => {},
+    }
+    if (opts.dispatcher !== false) {
+      webServer.serveResource = async (
+        req: IncomingMessage,
+        res: ServerResponse,
+        target: URL,
+        resource: ResourceFn,
+      ) => {
+        const headers = new Headers()
+        for (const [name, value] of Object.entries(req.headers)) {
+          for (const item of Array.isArray(value) ? value : [value]) {
+            if (item !== undefined) headers.append(name, item)
+          }
+        }
+        const response = await resource(new Request(target, { method: req.method, headers }))
+        res.writeHead(response.status, Object.fromEntries(response.headers))
+        res.end(await response.text())
+      }
+    }
+    for (const route of opts.preResources ?? []) {
+      const table = route.kind === 'exact' ? webServer.exact : webServer.prefixes
+      ;(table as Map<string, unknown>).set(route.path, route)
+      routes.push(route)
+    }
+    const provided = new Map<string, unknown>()
+    const ctx = {
+      get: (key: string) => {
+        if (key === 'webStartup') return { trustedHosts: [] }
+        if (key === 'credentials') return opts.credentials
+        return undefined
+      },
+      provide: (key: string, value: unknown) => { provided.set(key, value) },
+      effect: (fn: () => void) => { fn() },
+      on: () => () => {},
+      webServer,
+      logger: { info: () => {}, warn: () => {} },
+    } as unknown as Context
+    apply(ctx, {})
+    return { routes, webServer }
+  }
+
+  it('guards the resource fallback index and keeps dist assets public', async () => {
+    let calls = 0
+    const resource: ResourceFn = async () => {
+      calls += 1
+      return html('<html>spa</html>')
+    }
+    const { webServer } = fakeResourceWebAuthContext({ preFallback: { resource } })
+
+    // Remote anonymous navigation -> login wall, the resource never runs.
+    const rejected = jsonResponseCapture()
+    await (webServer.serveResource as NonNullable<typeof webServer.serveResource>)(
+      httpRequest({ host: 'dsh.example.com', ip: '192.0.2.90', accept: 'text/html' }),
+      rejected.res,
+      new URL('http://placeholder/'),
+      resource,
+    )
+    expect(rejected.captured.statusCode).toBe(302)
+    expect(rejected.captured.location).toBe('/login')
+    expect(calls).toBe(0)
+
+    // Anonymous dist assets stay public: the login page loads /favicon.svg.
+    const asset = jsonResponseCapture()
+    await (webServer.serveResource as NonNullable<typeof webServer.serveResource>)(
+      httpRequest({ url: '/favicon.svg', host: 'dsh.example.com', ip: '192.0.2.91' }),
+      asset.res,
+      new URL('http://placeholder/favicon.svg'),
+      resource,
+    )
+    expect(asset.captured.statusCode).toBe(200)
+    expect(calls).toBe(1)
+  })
+
+  it('mints the native cookie for a loopback index, then serves the resource', async () => {
+    const resource: ResourceFn = async () => html('<html>spa</html>')
+    const { webServer } = fakeResourceWebAuthContext({
+      preFallback: { resource },
+      credentials: fakeCredentials(),
+    })
+
+    const minted = jsonResponseCapture()
+    await (webServer.serveResource as NonNullable<typeof webServer.serveResource>)(
+      httpRequest({ host: '127.0.0.1:3080', ip: '127.0.0.1', accept: 'text/html' }),
+      minted.res,
+      new URL('http://placeholder/'),
+      resource,
+    )
+    expect(minted.captured.statusCode).toBe(200)
+    expectValidNativeCookie(minted.captured.setCookie ?? '')
+    expect(minted.captured.body).toContain('<meta http-equiv="refresh" content="0;url=/">')
+
+    // With the native cookie in place, the dispatcher is reached and serves.
+    const authority = new URL('http://127.0.0.1:3080').host
+    const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
+    const served = jsonResponseCapture()
+    await (webServer.serveResource as NonNullable<typeof webServer.serveResource>)(
+      httpRequest({
+        host: '127.0.0.1:3080',
+        ip: '127.0.0.1',
+        accept: 'text/html',
+        cookie: `${name}=v1.x.y`,
+      }),
+      served.res,
+      new URL('http://placeholder/'),
+      resource,
+    )
+    expect(served.captured.statusCode).toBe(200)
+    expect(served.captured.body).toBe('<html>spa</html>')
+  })
+
+  it('guards a named resource route like a handler route', async () => {
+    registerCredentials('admin', 'secret1')
+    let calls = 0
+    const resource: ResourceFn = async () => {
+      calls += 1
+      return html('bundle', 'text/javascript')
+    }
+    const { webServer } = fakeResourceWebAuthContext({
+      preResources: [{ kind: 'prefix', path: '/plugins', resource }],
+    })
+
+    // Anonymous bundle request: 401, not the bundle.
+    const anonymous = jsonResponseCapture()
+    await (webServer.serveResource as NonNullable<typeof webServer.serveResource>)(
+      httpRequest({ url: '/plugins/client.js', host: 'dsh.example.com', ip: '192.0.2.92' }),
+      anonymous.res,
+      new URL('http://placeholder/plugins/client.js'),
+      resource,
+    )
+    expect(anonymous.captured.statusCode).toBe(401)
+    expect(calls).toBe(0)
+
+    // Authenticated remote caller holding both cookies: served.
+    const authority = new URL('http://dsh.example.com:3080').host
+    const name = `dsh-auth-${createHash('sha256').update(authority).digest('base64url')}`
+    const served = jsonResponseCapture()
+    await (webServer.serveResource as NonNullable<typeof webServer.serveResource>)(
+      httpRequest({
+        url: '/plugins/client.js',
+        host: 'dsh.example.com',
+        ip: '192.0.2.93',
+        cookie: `${sessionCookie('admin')}; ${name}=v1.x.y`,
+      }),
+      served.res,
+      new URL('http://placeholder/plugins/client.js'),
+      resource,
+    )
+    expect(served.captured.statusCode).toBe(200)
+    expect(served.captured.body).toBe('bundle')
+    expect(calls).toBe(1)
+  })
+
+  it('keeps a post-activation resource fallback in resource form', async () => {
+    const resource: ResourceFn = async () => html('<html>spa</html>')
+    const { webServer } = fakeResourceWebAuthContext()
+    webServer.registerFallback({ resource })
+    expect(typeof webServer.fallback).not.toBe('function')
+    expect((webServer.fallback as { resource: ResourceFn }).resource).toBe(resource)
+
+    const rejected = jsonResponseCapture()
+    await (webServer.serveResource as NonNullable<typeof webServer.serveResource>)(
+      httpRequest({ host: 'dsh.example.com', ip: '192.0.2.94', accept: 'text/html' }),
+      rejected.res,
+      new URL('http://placeholder/'),
+      resource,
+    )
+    expect(rejected.captured.statusCode).toBe(302)
+    expect(rejected.captured.location).toBe('/login')
+  })
+
+  it('fails closed when resource routes appear without an interceptable dispatcher', () => {
+    const resource: ResourceFn = async () => html('<html>spa</html>')
+    expect(() =>
+      fakeResourceWebAuthContext({ dispatcher: false, preFallback: { resource } }),
+    ).toThrow(/not interceptable/)
+
+    const { webServer } = fakeResourceWebAuthContext({ dispatcher: false })
+    expect(() =>
+      webServer.register({ kind: 'exact', path: '/x', resource }),
+    ).toThrow(/not interceptable/)
+  })
+})
+
 // ── GET /api/auth/status: the front end redirects on its verdict ─────────────
 
 describe('GET /api/auth/status', () => {

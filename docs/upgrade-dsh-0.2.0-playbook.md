@@ -331,3 +331,36 @@
 - **隔离实例实机**（rc.5 CLI + 独立 `DSH_HOME`）：`--dump-config` 三行齐全 + 四注入 + `trustedHosts` 表达式；`--host 0.0.0.0` LAN 电池全绿（匿名导航 302 `/login`、匿名 API 401、登录/注册双 cookie、authed 页面 200、authed API 到 bridge 404、仅原生 cookie 401、仅 `dsh_sid` 303 补签、登出清理、匿名 bundle 401、authed 合并 bundle 含本插件 `client.js`）；`--host ::` 双栈启动正常（v4/v6 回环 200、LAN 302 `/login`）。
 - **依赖动作**：声明保持 `^0.2.1-rc.1`（caret 覆盖 rc.5），`npm update` 把 lock 解析到 rc.5；无需 bump 声明，也无需发版。
 - **实测口径（易误判）**：**回环请求默认被信任**，从 `127.0.0.1` 探测只会看到 303 补签/200，不代表登录墙放行；匿名用例必须用 LAN 地址，且带 `accept: text/html` 才走 302（否则按非导航处理，返回 JSON 401）。
+
+---
+
+## Phase 3 bump（2026-11-04，0.2.2-rc.1）
+
+`next` = **0.2.2-rc.1**（`latest` 仍 = 0.2.1-rc.5，`alpha` = 0.2.2-alpha.3）。**发现一处破坏性运行时改动并已适配。**
+
+### 静态 diff（`dsh-v0.2.1-rc.5` → `dsh-v0.2.2-rc.1`）
+
+- **观察哨 1–6 全绿**：webserver `Config.host`（0.2.1-line transform、通配拒绝、`bindUrlHost`/`getOrigin`）、web-app `startup.ts`/`public-url.ts`、`connection` 行（`inject: [webStartup]` + `trustedHosts: !!js ctx.webStartup.trustedHosts`）、`browser-auth.ts`/`api-request-trust.ts`/`rpc-host.ts`/`connection/src/index.ts`、cordis `Inject.resolve`（`registry.ts`）全部零 diff；`ui-settings` 仅新增 `settings.section.icon`，`ui-slots`/`credentials`/`cmdline` 只有版本号变化。
+- **新增哨 7 触发**：webserver 增加 `WebResource`/`WebResourceRoute`（Fetch Request → Response），`register`/`registerFallback` 接受 `{ resource }`；`frontend-static` 的 SPA fallback 改为 `{ resource }`，`modules` 的 `/plugins/*` 也从 handler 改为 resource。附带 `webserver/index-inject` 多一个 `peer` 参数、`renderIndex`/`collectIndexInjections` 需要 `peer`（本插件未消费这两个 API）。
+- **实测口径**：用旧产物（0.2.1-rc.5 构建）直接跑 0.2.2-rc.1 隔离实例——匿名 LAN 首页仍 302 `/login`（守卫抢在崩溃前返回），但**匿名 `/favicon.svg` 400**、**登录后 `GET /` 两次均 400**：`wrapFallback` 把 `{resource}` 对象当函数，webserver 按 handler 调用后 `handler(req,res)` 抛 TypeError，被顶层兜底转 400。匿名 `/plugins/*` 也变成可读（resource 绕过注册包装），旧行为是 401。
+
+### 适配（`src/auth.ts`）
+
+- handler 形态路径（0.2.1 及更早）**原样保留**，同一份产物双时代可用。
+- resource 形态的会话边界移到 `serveResource`（HTTP 分发点，入参仍持有 node req）：named resource 路由走同一 `protect`（302/401 + 补签），fallback 只守 `/` 与 `/index.html`，dist 资源保持公开——与 handler 时代语义逐条一致。**不能**在 resource 函数层做回环判定（Fetch Request 无 socket，只能信 Host=可伪造）；也**不能**把 resource 转成 handler（`readResource` 的进程内读取会 404，liveshare 依赖它）。
+- `registerFallback` 对 resource 对象不再包装；事后追溯只包装 handler 形态的 fallback/route。
+- `assertResourceDispatch`：resource 出现而 `serveResource` 不可拦截时直接抛 `web-auth: ... not interceptable`，拒绝激活（fail-closed），不静默降级。
+- 新增 5 个夹具用例（`tests/auth.spec.ts` 的 "resource-form routes and fallback (dsh 0.2.2+)"）：fallback index 守卫/资源公开、回环补签后放行、named resource 路由 401→authed 200、注册后 resource 保持形态、无分发点时 fail-closed。
+
+### 依赖与构建
+
+- 5 个 `@deepseek-ai/dsh-*` 依赖 `^0.2.1-rc.1` → `^0.2.2-rc.1`（手动 bump；caret+prerelease 不跨 0.2.2）。
+- **lock 必须重生成**：旧 lock 的 cordis 4.0.x 与 `dsh-client-ui-settings@0.2.2-rc.1` 的 peer `~4.1.0` ERESOLVE；全新安装解析到 cordis 4.1.0（仍在我们的 peer `^4.0.1` 内）。实测 `rm package-lock.json` + 清 `node_modules` 后 `npm install` 干净通过。
+- 构建探针：typecheck 0 错 / **235/235** / `lib/client.js` sha256 与既有产物一致（48.76 kB，前端插件未动）。
+
+### 隔离实例实机（`/tmp/dsh-022-e2e` = 0.2.2-rc.1，`DSH_HOME=/tmp/dsh-022-home`）
+
+- `--dump-config`：`web-startup` disabled、connection 四注入 `[webServer, webStartup, webAuth]` + `trustedHosts` 表达式、本插件三行齐全。
+- `--host 0.0.0.0`（3299）：匿名 LAN index → 302 `/login`；匿名 `/favicon.svg` → **200**；匿名 POST `/api/rpc` → 401；匿名 `/plugins/whatever` → **401**；注册 → 双 cookie；authed `GET /` → **200 43621 B**（含 `__DSH_BOOT__` 与本插件 `client.js`）；authed bundle → 200 / 匿名同 URL → 401；回环 `GET /` → 200 补签跳板（150 B），第二次 → 200 SPA；登出 → 200 且随后 index 302。
+- `--host ::`（3298）：v4/v6 回环 200、LAN index 302 `/login`、LAN RPC 401、LAN favicon 200。
+- **0.2.1-rc.5 回归**（`/tmp/dsh-021-e2e`，同一份 0.2.2 构建产物 link 进 0.2.1 实例）：匿名 index 302、favicon 200、RPC 401、注册成功、authed index 200 41490 B、回环补签 200 后 200 SPA、匿名 `/plugins/*` 401——handler 路径零回归。

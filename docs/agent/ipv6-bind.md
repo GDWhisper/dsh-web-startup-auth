@@ -93,6 +93,7 @@ dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（�
 4. **diff web-app patch 的 `connection` 行**（`inject` 与 `trustedHosts` 表达式）：我们的行是 stock 行的逐字镜像（+`webAuth`）。stock 若改行形状，我们的 `cordis.patch.yml` 同步跟。
 5. **diff webserver 的 `Config.dict.tls` 成员与 webserver/web-runtime 行对 `webStartup.tls`/`publicUrl` 的消费**：`supportsTlsConfig` 探测与透传字段形状的依据（`tls` 成员被改名/移除 → 门禁失准）。
 6. **`!!js` 表达式的注入门禁语义**（cordis loader `Inject.resolve` + config 插值）：上游若改 `ctx.<service>` 访问语义或行级 inject 合并规则（哨 3 依赖「合并非替换」），`connection` 行症状是启动 `cannot get property ... without inject` 或表达式静默取空。
+7. **diff webserver 的 resource 分发形态（0.2.2+）**：`register`/`registerFallback` 接受 `{ resource }`（Fetch Request → Response），HTTP 分发点是 `serveResource(req, res, target, resource)`。本插件的 resource 路由守卫挂在该分发点上（`docs/agent/auth-mechanics.md`「路由保护顺序」）——它一旦改名/移除而 resource 形态仍在，`assertResourceDispatch` 会让插件拒绝激活（fail-closed）；不要把它降级成静默跳过。host schema 与 resource 分发是两套 watch，互不影响。
 
 > **0.2.0-rc.1 观察哨已跑（2026-09-28）**：哨 1–6（当时为 1–5 版）全部无触发——`webserver/src/index.ts`（含 `Config.host` union）逐字零 diff、`resolveLanTrust` 仍 IPv4-only、围栏三函数零 diff、`vendor/` cordis 零 diff；**清理清单不启动**。`--host ::` 双实例拓宽（哨 2）与围栏 403/401 分界（陌生 Host 403、双栈 IPv4 LAN 401）隔离实例实测通过，见 `docs/upgrade-dsh-0.2.0-playbook.md`「B」。
 >
@@ -105,6 +106,8 @@ dsh 的 webserver host 值域在两个时代是**方向相反的两堵墙**（�
 > **0.2.1-rc.1 / rc.2 观察哨已跑（2026-10-17，Phase 2 bump）**：alpha 线转入 `next` 正式通道（`next` = `0.2.1-rc.2`，`latest` 仍 = `0.2.0-rc.2`），依赖 bump 到 `^0.2.1-rc.1`。哨 1–6 全部无触发——webserver 的 `Config.host` transform 与 alpha.2 零 diff（rc.1 只**新增** `bindUrlHost`/`getOrigin()` 两个导出，host schema 本体未动）、`resolveLanTrust`/`webRuntime` 依旧不存在（我们本就自给自足）、围栏三函数零 diff、web-app `connection` 行与 alpha.2 逐字一致（rc.1→rc.2 仅多一个无关 client 行 `ui-deepseek-model-label-1017`）、`connection/request` waterfall 零动。**镜像对象零 diff**：`COOKIE_PAYLOAD_VERSION = 1`（浏览器 cookie 仍 v1）、`requestAudience`/`sessionCookie`/`cookieName`/`STORED_SECRET_VERSION`/`SECRET_BYTES`/`AUTH_RECORD_KEY`/`parsePublicUrl`/`authenticatedUrl` 全部逐字未变。rc.1→rc.2 之间 7 个关联包的 `lib/` **逐字节相同**（只 `package.json` 版本/peer 稳定化）。隔离实例三形态实测见下节「0.2.1-rc.2 实机验收」。
 
 > **0.2.1-rc.5 观察哨已跑（2026-11-03）**：`next`/`latest` = `0.2.1-rc.5`（`alpha` = 0.2.2-alpha.2）。哨 1–6 全部无触发——`webserver/src/index.ts`（host schema、`bindUrlHost`/`getOrigin`）、`web-app/src/startup.ts`、`web-app/src/public-url.ts` 与 `connection/src/index.ts` 逐字未变；web-app `cordis.patch.yml` 仅多一行无关 client 行（`ui-entry-customization`）。依赖仍是 `^0.2.1-rc.1`，lock 已解析到 rc.5；隔离实例 `--host 0.0.0.0`（LAN 电池）与 `--host ::`（双栈：v4/v6 回环 200、LAN 302 `/login`）均正常启动，四注入 + `trustedHosts` 表达式见 `--dump-config`。
+>
+> **0.2.2-rc.1 观察哨已跑（2026-11-04）**：`next` = `0.2.2-rc.1`（`latest` 仍 = 0.2.1-rc.5，`alpha` = 0.2.2-alpha.3）。哨 1–6 全部无触发——**host schema 逐字未变**（`Config.host` transform、通配拒绝、`bindUrlHost`/`getOrigin` 与 rc.5 零 diff），widen 与 `lanHosts` 无需调整；`connection` 行、trustedHosts 表达式、四个镜像对象、`Inject.resolve` 均零 diff。**新增哨 7 触发**（非 host 面）：webserver 增加 resource 形态，`frontend-static` fallback 与 `modules` `/plugins` 已切换——旧产物的 fallback 包装把 `{ resource }` 当函数，静态资源与登录后 SPA 实测 400；适配见 `docs/agent/auth-mechanics.md`「路由保护顺序」与 playbook「Phase 3 bump（2026-11-04，0.2.2-rc.1）」。适配后隔离实例 `--host 0.0.0.0` 与 `--host ::` 均全绿（0.2.1-rc.5 回归也全绿）。
 
 ## 实机验收（E2E 记录，2026-09-27，dsh 0.1.7-rc.1 + 本插件 link）
 
