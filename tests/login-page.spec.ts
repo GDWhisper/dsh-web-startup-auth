@@ -28,6 +28,15 @@ describe('login page', () => {
     expect(script).toBeDefined()
     expect(() => new Function(script ?? '')).not.toThrow()
   })
+
+  it('inverts the whale logo in dark mode so it stays visible', () => {
+    // /favicon.svg is a black whale on a transparent background: on the dark
+    // card (#111111) it all but disappears (issue #54). The filter must stay
+    // inside the dark media query — light mode keeps the original black mark.
+    const dark = /@media \(prefers-color-scheme: dark\) \{([\s\S]*?)^    \}/m.exec(LOGIN_PAGE_HTML)?.[1]
+    expect(dark).toBeDefined()
+    expect(dark).toMatch(/\.logo\s*\{[^}]*filter:\s*invert\(1\)/)
+  })
 })
 
 /**

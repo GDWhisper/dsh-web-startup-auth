@@ -997,16 +997,30 @@ export function AuthSection(props: PropsRuntime<'settings.section'>): ReactEleme
             {sessionMaxAgeDays === undefined ? (
               <span style={{ color: 'var(--dsw-alias-label-tertiary, #666)' }}>正在读取…</span>
             ) : (
-              <select
-                value={sessionMaxAgeDays}
-                disabled={busy}
-                onChange={(event) => void saveSessionMaxAge(Number(event.target.value))}
-                style={{ ...inputStyle, width: 'auto' }}
-              >
-                {SESSION_MAX_AGE_CHOICES.map((days) => (
-                  <option key={days} value={days}>{days} 天</option>
-                ))}
-              </select>
+              <span style={{ position: 'relative', display: 'inline-flex', alignItems: 'center' }}>
+                <select
+                  value={sessionMaxAgeDays}
+                  disabled={busy}
+                  onChange={(event) => void saveSessionMaxAge(Number(event.target.value))}
+                  /* Drop the native arrow: it hugs the right edge and forces
+                     the box as wide as the longest option ("180 天"). */
+                  style={{
+                    ...inputStyle,
+                    width: 'auto',
+                    appearance: 'none',
+                    WebkitAppearance: 'none',
+                    paddingRight: 28,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {SESSION_MAX_AGE_CHOICES.map((days) => (
+                    <option key={days} value={days}>{days} 天</option>
+                  ))}
+                </select>
+                <span style={{ position: 'absolute', right: 9, display: 'inline-flex', pointerEvents: 'none' }}>
+                  <Chevron up={false} />
+                </span>
+              </span>
             )}
           </label>
           {notice?.owner === 'sessionMaxAge' && (

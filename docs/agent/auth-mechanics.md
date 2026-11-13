@@ -82,7 +82,7 @@
 
 ## 登录页品牌字标
 
-`src/login-page.ts` 内联了从 `packages/client/ui-primitives/src/BrandWordmark.tsx` **原样提取**的 SVG（deepseek 字母 + HARNESS 徽章板，鲸鱼已删）。徽章字母的 `fill="var(--dsw-alias-label-primary-inverted)"` 与徽章板 `fill="var(--dsh-wordmark-plate)"` 都依赖页面 `:root` 变量——明色下板深字白、暗色下板浅字深；删除任一变量会看不见字。登录页是**独立文档**，不继承 shell 的 `--dsw-*` token，主题走 `@media (prefers-color-scheme: dark)`（系统偏好，不跟随应用内主题）。品牌元素必须**照搬原版 SVG**，不要用 CSS 手绘模拟。
+`src/login-page.ts` 内联了从 `packages/client/ui-primitives/src/BrandWordmark.tsx` **原样提取**的 SVG（deepseek 字母 + HARNESS 徽章板，鲸鱼已删）。徽章字母的 `fill="var(--dsw-alias-label-primary-inverted)"` 与徽章板 `fill="var(--dsh-wordmark-plate)"` 都依赖页面 `:root` 变量——明色下板深字白、暗色下板浅字深；删除任一变量会看不见字。登录页是**独立文档**，不继承 shell 的 `--dsw-*` token，主题走 `@media (prefers-color-scheme: dark)`（系统偏好，不跟随应用内主题）。品牌元素必须**照搬原版 SVG**，不要用 CSS 手绘模拟。**卡片顶部的鲸鱼 logo 走另一路**：`<img class="logo" src="/favicon.svg">` 引用上游静态资源，它是透明底纯黑（`#000`）鲸鱼，不吃页面变量；深色下靠同一个媒体查询里的 `.logo { filter: invert(1) }` 反白，否则黑鲸鱼直接融进 `#111111` 背景（issue #54）。明色不加滤镜，保持原样——滤镜只能待在 dark 查询里。
 
 ## 测试要点（`tests/`）
 
